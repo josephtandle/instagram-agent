@@ -5,4 +5,6 @@ __pycache__/
 .venv/
 node_modules/
 data/sessions/
+transcriber/data/
+transcriber/status.json
 status.json
