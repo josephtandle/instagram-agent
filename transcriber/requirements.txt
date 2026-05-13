@@ -1,0 +1,3 @@
+instaloader
+openai
+python-dotenv

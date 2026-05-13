@@ -1,0 +1,19 @@
+{
+  "id": "agent/instagram/reply-comment",
+  "layer": "agent",
+  "owner": "instagram",
+  "title": "Reply to an Instagram comment",
+  "tags": ["instagram", "comment", "reply", "engagement"],
+  "phrases": [
+    "reply to instagram comment",
+    "comment back on instagram",
+    "respond to instagram comment",
+    "instagram comment reply",
+    "reply on instagram post"
+  ],
+  "inputMode": "structured",
+  "requiredContext": ["agent:instagram"],
+  "outputMode": "text",
+  "fallbackPolicy": "worker_optional",
+  "handler": "./reply-comment.js"
+}

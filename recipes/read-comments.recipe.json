@@ -1,0 +1,19 @@
+{
+  "id": "agent/instagram/read-comments",
+  "layer": "agent",
+  "owner": "instagram",
+  "title": "Read Instagram post comments",
+  "tags": ["instagram", "comments", "replies", "engagement"],
+  "phrases": [
+    "read instagram comments",
+    "check comments on instagram post",
+    "instagram post comments",
+    "see instagram reel comments",
+    "read comments on instagram"
+  ],
+  "inputMode": "structured",
+  "requiredContext": ["agent:instagram"],
+  "outputMode": "text",
+  "fallbackPolicy": "worker_optional",
+  "handler": "./read-comments.js"
+}

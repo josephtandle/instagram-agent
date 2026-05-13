@@ -1,0 +1,19 @@
+{
+  "id": "agent/instagram/send-dm",
+  "layer": "agent",
+  "owner": "instagram",
+  "title": "Send an Instagram DM",
+  "tags": ["instagram", "dm", "message", "direct"],
+  "phrases": [
+    "send instagram dm",
+    "send instagram message",
+    "dm on instagram",
+    "instagram direct message",
+    "message someone on instagram"
+  ],
+  "inputMode": "structured",
+  "requiredContext": ["agent:instagram"],
+  "outputMode": "text",
+  "fallbackPolicy": "worker_optional",
+  "handler": "./send-dm.js"
+}

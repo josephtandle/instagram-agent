@@ -1,0 +1,19 @@
+{
+  "id": "agent/instagram/post-story",
+  "layer": "agent",
+  "owner": "instagram",
+  "title": "Post an Instagram story",
+  "tags": ["instagram", "story", "tag", "publish"],
+  "phrases": [
+    "instagram story",
+    "post an instagram story",
+    "publish instagram story",
+    "upload to story",
+    "tag instagram story"
+  ],
+  "inputMode": "structured",
+  "requiredContext": ["agent:instagram"],
+  "outputMode": "text",
+  "fallbackPolicy": "worker_optional",
+  "handler": "./post-story.js"
+}

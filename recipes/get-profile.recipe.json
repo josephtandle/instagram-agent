@@ -1,0 +1,18 @@
+{
+  "id": "agent/instagram/get-profile",
+  "layer": "agent",
+  "owner": "instagram",
+  "title": "Get an Instagram profile summary",
+  "tags": ["instagram", "profile", "bio", "posts"],
+  "phrases": [
+    "instagram profile",
+    "get instagram profile",
+    "fetch instagram profile",
+    "profile bio and posts"
+  ],
+  "inputMode": "structured",
+  "requiredContext": ["agent:instagram"],
+  "outputMode": "text",
+  "fallbackPolicy": "worker_optional",
+  "handler": "./get-profile.js"
+}

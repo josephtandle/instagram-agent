@@ -1,0 +1,18 @@
+{
+  "id": "agent/instagram/resolve-user",
+  "layer": "agent",
+  "owner": "instagram",
+  "title": "Resolve an Instagram username to a user ID",
+  "tags": ["instagram", "username", "user-id", "resolve"],
+  "phrases": [
+    "resolve instagram user",
+    "instagram username to id",
+    "username to user id",
+    "resolve instagram handle"
+  ],
+  "inputMode": "structured",
+  "requiredContext": ["agent:instagram"],
+  "outputMode": "text",
+  "fallbackPolicy": "worker_optional",
+  "handler": "./resolve-user.js"
+}

@@ -1,0 +1,21 @@
+{
+  "name": "instagram-agent",
+  "version": "1.0.0",
+  "description": "Instagram agent for reading DMs, researching profiles, posting content, and capturing leads into a CRM workflow.",
+  "bin": {
+    "instagram": "./install/launcher.js"
+  },
+  "scripts": {
+    "install:local": "node ./install/install-instagram.js",
+    "status": "node ./install/launcher.js status"
+  },
+  "keywords": [
+    "instagram",
+    "dm",
+    "crm",
+    "lead-capture",
+    "claude-code",
+    "codex"
+  ],
+  "license": "MIT"
+}

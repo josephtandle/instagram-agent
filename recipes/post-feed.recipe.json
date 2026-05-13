@@ -1,0 +1,18 @@
+{
+  "id": "agent/instagram/post-feed",
+  "layer": "agent",
+  "owner": "instagram",
+  "title": "Post an Instagram feed item",
+  "tags": ["instagram", "feed", "post", "publish"],
+  "phrases": [
+    "instagram feed post",
+    "post to instagram feed",
+    "publish to instagram feed",
+    "instagram feed upload"
+  ],
+  "inputMode": "structured",
+  "requiredContext": ["agent:instagram"],
+  "outputMode": "text",
+  "fallbackPolicy": "worker_optional",
+  "handler": "./post-feed.js"
+}

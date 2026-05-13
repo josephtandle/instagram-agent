@@ -1,0 +1,19 @@
+{
+  "id": "agent/instagram/post-carousel",
+  "layer": "agent",
+  "owner": "instagram",
+  "title": "Post an Instagram carousel",
+  "tags": ["instagram", "carousel", "album", "multi-image", "feed"],
+  "phrases": [
+    "instagram carousel",
+    "post carousel",
+    "instagram album post",
+    "carousel feed post",
+    "multiple image instagram post"
+  ],
+  "inputMode": "structured",
+  "requiredContext": ["agent:instagram"],
+  "outputMode": "text",
+  "fallbackPolicy": "worker_optional",
+  "handler": "./post-carousel.js"
+}
