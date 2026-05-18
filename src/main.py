@@ -84,13 +84,6 @@ def typing_delay(text: str) -> None:
     time.sleep(duration)
 
 
-def per_item_pause(n: int, kind: str = "read") -> None:
-    """Pause after each item in a list — reading each one takes time."""
-    for _ in range(n):
-        lo, hi = _PAUSE_RANGES.get(kind, _PAUSE_RANGES["read"])
-        time.sleep(random.uniform(lo * 0.5, hi * 0.5))
-
-
 # ── Helpers ───────────────────────────────────────────────────────
 
 def write_status(status: str, result: str | None, message: str | None):
@@ -549,8 +542,6 @@ def cmd_read_dms(args):
                     "timestamp": m.timestamp.isoformat() if m.timestamp else "",
                     "item_type": m.item_type,
                 })
-            # Read each message at a human pace
-            per_item_pause(len(messages), "read")
             print(json.dumps({"handle": handle, "messages": messages}, ensure_ascii=False, indent=2))
         else:
             human_pause("scroll")  # opening inbox and scanning it
@@ -566,8 +557,6 @@ def cmd_read_dms(args):
                     "last_ts": last.timestamp.isoformat() if last and last.timestamp else "",
                     "unread": t.unread_count or 0,
                 })
-            # Scan each thread preview at a human pace
-            per_item_pause(len(result), "read")
             print(json.dumps(result, ensure_ascii=False, indent=2))
 
         write_status("idle", "success", "DMs read")
@@ -627,8 +616,6 @@ def cmd_read_comments(args):
                 "user_id": str(getattr(user, "pk", "")) if user else "",
             })
 
-        # Read each comment at a human pace
-        per_item_pause(len(result), "read")
         print(json.dumps({
             "media": args.media,
             "media_id": media_id,
