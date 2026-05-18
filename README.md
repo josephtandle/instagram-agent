@@ -1,43 +1,74 @@
-# Instagram
+# Instagram Agent
 
-Instagram is a local agent for reading DMs, researching profiles, reading comments, posting content, and supporting CRM lead capture from Instagram.
+A local CLI agent for managing Instagram — read DMs, research profiles, read comments, and post content. Built on [instagrapi](https://github.com/subzeroid/instagrapi), the same private API the mobile app uses.
 
-It uses `instagrapi`, which is an unofficial private API. That means it is powerful and useful for early workflows, but it is not the ideal long-term production architecture.
+## What it does
 
-Recommended framing:
-- Use it primarily for reading, reviewing, and capturing inbound interest into a CRM.
-- Use sending very minimally if at all.
-- Do not use it for mass DMs.
-- The stronger long-term path is the official Meta API.
+- Read DM threads (inbox or one-on-one)
+- Send DMs
+- Fetch any public profile: bio, follower count, recent post captions
+- Read and reply to comments on posts and Reels
+- Post to Feed, Stories, Reels, and carousels
+- Resolve handles to user IDs
+- Transcribe Instagram videos (via `transcriber/` sub-agent)
 
-## What it can do
+## How to use it (and how not to)
 
-- `get-profile`
-- `read-dms`
-- `send-dm`
-- `post-feed`
-- `post-story`
-- `post-reel`
-- `post-carousel`
-- `read-comments`
-- `reply-comment`
-- `resolve-user`
+**Good uses:**
+- Reading inbound DMs and capturing leads into a CRM
+- Researching profiles before outreach
+- Posting your own content
+- Reading comments on your posts
 
-## Sub-agents
+**Do not use it for:**
+- Mass DMs or any bulk outreach — this will get your account flagged fast
+- Following/unfollowing at scale
+- Any automated sending that isn't triggered by a real intent
 
-- **`transcriber/`** — Download and transcribe Instagram videos using Whisper
+Instagram monitors behavioral patterns. This agent includes safety guardrails, but they do not make it invincible. Use it like a human would: deliberately, for specific tasks, not in a loop.
+
+## Safety guardrails built in
+
+This agent has several layers of protection to reduce the risk of account flags:
+
+**Human timing** — every action waits a realistic random interval before executing:
+- Glance (1.5-4s): between quick lookups
+- Read (3-8s): opening a thread or post
+- Scroll (5-14s): browsing inbox or a profile grid
+- Think (6-16s): landing on a profile
+- Compose (4-10s): opening the message box
+- Post (10-28s): reviewing content before uploading
+- Typing delay: scaled to message length at ~40 WPM
+
+**Daily DM cap** — hard limit of 20 outbound DMs per account per day. Counter resets at midnight UTC. Tracked in `data/usage.json`.
+
+**Device fingerprint persistence** — your device profile (hardware ID, user agent) is generated once and stored in `~/.instagram-agent/device.json`. It is reused across sessions so each login looks like the same device.
+
+**Smart session management** — sessions are validated cheaply before reuse, without triggering a full re-login. Login is only attempted when the session has actually expired.
+
+**Specific error handling** — challenge required, rate limit, bad password, and feedback-blocked responses each surface a clear, actionable message instead of silently failing.
+
+## Requirements
+
+Before installing, make sure you have:
+
+| Requirement | Version | How to install |
+|---|---|---|
+| **Python** | 3.10 or higher | [python.org](https://python.org) or `brew install python@3.11` |
+| **Node.js** | 16 or higher | [nodejs.org](https://nodejs.org) |
+| **Git** | any | [git-scm.com](https://git-scm.com) |
+
+The installer handles all Python dependencies (instagrapi, python-dotenv) automatically inside a virtual environment.
 
 ## Installation
 
-### One-line install
-
-macOS/Linux:
+### macOS / Linux
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/josephtandle/instagram-agent/main/install.sh | bash
 ```
 
-Windows PowerShell:
+### Windows (PowerShell)
 
 ```powershell
 irm https://raw.githubusercontent.com/josephtandle/instagram-agent/main/install.ps1 | iex
@@ -48,28 +79,67 @@ irm https://raw.githubusercontent.com/josephtandle/instagram-agent/main/install.
 ```bash
 git clone https://github.com/josephtandle/instagram-agent
 cd instagram-agent
-node install/install-instagram.js --target ~/Tools/Instagram
+node install/install-instagram.js
 ```
 
 The installer:
-- creates a Python virtualenv
-- installs dependencies
-- saves the resolved absolute install path in `~/.instagram-agent/install.json`
-- tries to make the `instagram` command available globally
+1. Checks for Python 3.10+, Node.js, and Git
+2. Copies the agent to `~/Tools/Instagram/` (configurable with `--target /your/path`)
+3. Creates a Python virtual environment and installs all dependencies
+4. Saves the install path to `~/.instagram-agent/install.json`
+5. Registers the `instagram` CLI command globally
 
-## Usage
+## First-time setup
 
-### Authenticate (first time)
+**1. Set your credentials**
+
+Edit `~/.instagram-agent/.env` (created by the installer):
+
+```
+IG_USERNAME=your-instagram-handle
+IG_PASSWORD=your-password
+```
+
+**2. Log in and save your session**
 
 ```bash
 instagram login
 ```
 
-Session is saved to `data/sessions/<username>.json` and reused automatically.
+If your account has 2FA enabled, you will be prompted for the code. The session is saved and reused automatically — you will not need to log in again unless the session expires.
 
-### Post a Story (with user tags)
+## Usage
+
+### Read recent DM threads
 
 ```bash
+instagram read-dms --limit 20
+```
+
+### Read one specific thread
+
+```bash
+instagram read-dms --handle @someuser --limit 50
+```
+
+### Send a DM
+
+```bash
+instagram send-dm @someuser --text "Hey, thanks for reaching out."
+```
+
+Note: limited to 20 DMs per day per account.
+
+### Fetch a profile
+
+```bash
+instagram get-profile @someuser --posts 12
+```
+
+### Post a Story
+
+```bash
+instagram post-story --path /path/to/video.mp4
 instagram post-story --path /path/to/video.mp4 --tag @handle1 @handle2
 ```
 
@@ -88,25 +158,7 @@ instagram post-reel --path /path/to/video.mp4 --caption "Caption text"
 ### Post a carousel
 
 ```bash
-instagram post-carousel --paths /path/one.jpg /path/two.jpg --caption "Caption text"
-```
-
-### Read recent DM threads
-
-```bash
-instagram read-dms --limit 20
-```
-
-### Read one specific thread
-
-```bash
-instagram read-dms --handle @someuser --limit 50
-```
-
-### Send a DM
-
-```bash
-instagram send-dm @someuser --text "Hello"
+instagram post-carousel --paths /path/one.jpg /path/two.jpg /path/three.jpg --caption "Caption"
 ```
 
 ### Read comments on a post or Reel
@@ -115,10 +167,10 @@ instagram send-dm @someuser --text "Hello"
 instagram read-comments https://www.instagram.com/p/SHORTCODE/ --limit 20
 ```
 
-### Reply to a specific comment
+### Reply to a comment
 
 ```bash
-instagram reply-comment https://www.instagram.com/p/SHORTCODE/ --comment-id 12345678901234567 --text "Appreciate you."
+instagram reply-comment https://www.instagram.com/p/SHORTCODE/ --comment-id 12345678901234567 --text "Thanks!"
 ```
 
 ### Post a top-level comment
@@ -127,10 +179,10 @@ instagram reply-comment https://www.instagram.com/p/SHORTCODE/ --comment-id 1234
 instagram reply-comment SHORTCODE --text "Thanks for watching."
 ```
 
-### Resolve username → user ID
+### Resolve username to user ID
 
 ```bash
-instagram resolve-user @joe.che.official @thedanholloway
+instagram resolve-user @someuser @anotheruser
 ```
 
 ### Check agent status
@@ -143,31 +195,28 @@ instagram status
 
 | Variable | Required | Description |
 |---|---|---|
-| `IG_USERNAME` | No | Default Instagram account (default: joe.che.official) |
+| `IG_USERNAME` | Yes | Your Instagram handle (set in `~/.instagram-agent/.env`) |
 | `IG_PASSWORD` | Yes (first login) | Instagram password |
+| `INSTAGRAM_AGENT_ENV` | No | Custom path to a `.env` file |
 
-The agent looks for environment variables in this order:
+The agent looks for credentials in this order:
 
-1. `INSTAGRAM_AGENT_ENV` if set
+1. `INSTAGRAM_AGENT_ENV` (if set — points to a custom `.env` path)
 2. `<install-dir>/.env`
 3. `~/.instagram-agent/.env`
-4. `~/.myos/workspace/.env` for backwards compatibility
 
 ## Notes
 
 - Uses instagrapi (unofficial private API) — same as the mobile app
-- Session is cached after first login; password only needed once
-- Story tagging uses usertag positions spread across the frame
+- Session is cached after first login; password is only needed once
 - Supports video (.mp4, .mov) and image (.jpg, .png) for all post types
-- Supports reading comments and replying to comments on posts/Reels
-- Best use case for Mastermind students: read Instagram conversations, capture leads, organize follow-up, and move opportunities into a CRM
+- Story tagging places user mentions at evenly distributed positions across the frame
+- Good fit for: reading conversations, capturing inbound leads, organizing follow-up, and moving opportunities into a CRM
 
-## Export Guidance For IG Reels / Edits
+## Sub-agents
 
-When Joe is exporting a video from Edits for Instagram:
+- **`transcriber/`** — Download and transcribe Instagram videos locally using Whisper
 
-- Use SDR unless the editor delivered a true HDR grade and the HDR preview looks intentional.
-- Use 30 fps by default.
-- Use 60 fps only when the source video is 60 fps or has fast motion that benefits from it.
-- Use 2K or 1080p for direct Instagram publishing. 4K is only worth exporting if Joe wants an archive/master copy too, because Instagram will compress it.
-- Match the original frame rate when possible. If unsure, choose 30 fps.
+## License
+
+MIT

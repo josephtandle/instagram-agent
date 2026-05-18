@@ -1,11 +1,23 @@
 const fs = require("node:fs");
+const os = require("node:os");
 const path = require("node:path");
 
 const { RecipeInputError } = require("../../shared/recipe-errors");
 
 const AGENT_ROOT = path.resolve(__dirname, "..");
 const MAIN_SCRIPT = path.join(AGENT_ROOT, "src", "main.py");
-const PYTHON_BIN = process.env.PYTHON3_14 || "python3.14";
+const MANIFEST_PATH = path.join(os.homedir(), ".instagram-agent", "install.json");
+
+function _readManifest() {
+  try {
+    return JSON.parse(fs.readFileSync(MANIFEST_PATH, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+const _manifest = _readManifest();
+const PYTHON_BIN = _manifest?.pythonPath || process.env.PYTHON3 || "python3";
 const VIDEO_EXTENSIONS = new Set([".mp4", ".mov", ".avi", ".mkv"]);
 
 function getInputValue(input, key, fallback = undefined) {

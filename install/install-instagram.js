@@ -35,28 +35,39 @@ function ensureDir(dirPath) {
   fs.mkdirSync(dirPath, { recursive: true });
 }
 
-function copyRecursive(sourceDir, destDir) {
+const COPY_SKIP_NAMES = new Set([".git", "node_modules", ".venv", "__pycache__"]);
+const DATA_SKIP_NAMES = new Set(["sessions", "usage.json"]);
+const TRANSCRIBER_SKIP_NAMES = new Set(["data"]);
+
+function copyRecursive(sourceDir, destDir, skipNames = COPY_SKIP_NAMES) {
   ensureDir(destDir);
   for (const entry of fs.readdirSync(sourceDir, { withFileTypes: true })) {
-    if ([
-      ".git",
-      "node_modules",
-      ".venv",
-      "__pycache__",
-    ].includes(entry.name)) {
-      continue;
-    }
+    if (skipNames.has(entry.name)) continue;
+
+    // status.json is runtime state — never ship it to other users
+    if (entry.name === "status.json") continue;
+
     if (entry.name === "data") {
       const sourceData = path.join(sourceDir, entry.name);
       const destData = path.join(destDir, entry.name);
       ensureDir(destData);
       for (const dataEntry of fs.readdirSync(sourceData, { withFileTypes: true })) {
-        if (dataEntry.name === "sessions") continue;
+        if (DATA_SKIP_NAMES.has(dataEntry.name)) continue;
         const src = path.join(sourceData, dataEntry.name);
         const dst = path.join(destData, dataEntry.name);
         if (dataEntry.isDirectory()) copyRecursive(src, dst);
         else fs.copyFileSync(src, dst);
       }
+      continue;
+    }
+
+    if (entry.name === "transcriber" && entry.isDirectory()) {
+      // Copy transcriber but skip its local data cache
+      copyRecursive(
+        path.join(sourceDir, entry.name),
+        path.join(destDir, entry.name),
+        new Set([...COPY_SKIP_NAMES, ...TRANSCRIBER_SKIP_NAMES]),
+      );
       continue;
     }
 
@@ -80,6 +91,15 @@ function fileExists(filePath) {
   }
 }
 
+function isPython310Plus(command) {
+  const result = spawnSync(
+    command,
+    ["-c", "import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)"],
+    { encoding: "utf8" },
+  );
+  return result.status === 0;
+}
+
 function findPython() {
   const attempts = process.platform === "win32"
     ? [
@@ -93,7 +113,14 @@ function findPython() {
 
   for (const [command, args] of attempts) {
     const result = spawnSync(command, args, { encoding: "utf8" });
-    if (result.status === 0) return command;
+    if (result.status !== 0) continue;
+    if (!isPython310Plus(command)) {
+      throw new Error(
+        `Python 3.10+ is required, but the detected ${command} is older.\n` +
+        "Install Python 3.10+ via pyenv, Homebrew (brew install python@3.11), or python.org.",
+      );
+    }
+    return command;
   }
 
   throw new Error("Could not find Python 3. Install Python 3.10+ and try again.");

@@ -8,13 +8,20 @@ import os
 import random
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 AGENT_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = AGENT_DIR / "data"
 SESSIONS_DIR = DATA_DIR / "sessions"
 STATUS_PATH = AGENT_DIR / "status.json"
+CONFIG_DIR = Path.home() / ".instagram-agent"
+DEVICE_PATH = CONFIG_DIR / "device.json"
+USAGE_PATH = DATA_DIR / "usage.json"
+
+DAILY_CAPS = {
+    "sent_dms": 20,
+}
 
 from dotenv import load_dotenv
 
@@ -29,7 +36,6 @@ def load_environment():
     candidates.extend([
         AGENT_DIR / ".env",
         Path.home() / ".instagram-agent" / ".env",
-        Path.home() / ".myos" / "workspace" / ".env",
     ])
 
     for env_path in candidates:
@@ -44,7 +50,7 @@ ENV_PATH = load_environment()
 
 SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
 
-IG_USERNAME = os.environ.get("IG_USERNAME", "joe.che.official")
+IG_USERNAME = os.environ.get("IG_USERNAME", "")
 
 
 # ── Human timing ──────────────────────────────────────────────────
@@ -64,7 +70,7 @@ _PAUSE_RANGES = {
 def human_pause(kind: str = "glance") -> None:
     lo, hi = _PAUSE_RANGES.get(kind, _PAUSE_RANGES["glance"])
     duration = random.uniform(lo, hi)
-    print(f"  [human pause: {duration:.1f}s]", flush=True)
+    print(f"  [human pause: {duration:.1f}s]", file=sys.stderr, flush=True)
     time.sleep(duration)
 
 
@@ -74,7 +80,7 @@ def typing_delay(text: str) -> None:
     base_seconds = (words / 40) * 60
     jitter = random.uniform(0.75, 1.5)
     duration = max(3.0, base_seconds * jitter)
-    print(f"  [typing delay: {duration:.1f}s for {words} words]", flush=True)
+    print(f"  [typing delay: {duration:.1f}s for {words} words]", file=sys.stderr, flush=True)
     time.sleep(duration)
 
 
@@ -106,50 +112,130 @@ def write_status(status: str, result: str | None, message: str | None):
     STATUS_PATH.write_text(json.dumps(data, indent=2) + "\n")
 
 
+def get_or_create_device() -> dict:
+    """Load or generate a persistent device fingerprint stored in ~/.instagram-agent/device.json."""
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    if DEVICE_PATH.exists():
+        try:
+            return json.loads(DEVICE_PATH.read_text())
+        except (json.JSONDecodeError, KeyError):
+            pass
+    from instagrapi import Client
+    tmp = Client()
+    device = {
+        "device_settings": tmp.device_settings,
+        "user_agent": tmp.user_agent,
+    }
+    DEVICE_PATH.write_text(json.dumps(device, indent=2) + "\n")
+    return device
+
+
+def _load_usage() -> dict:
+    try:
+        return json.loads(USAGE_PATH.read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def _save_usage(usage: dict) -> None:
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).strftime("%Y-%m-%d")
+    pruned = {k: v for k, v in usage.items() if k >= cutoff}
+    USAGE_PATH.write_text(json.dumps(pruned, indent=2) + "\n")
+
+
+def check_daily_cap(username: str, action: str) -> None:
+    cap = DAILY_CAPS.get(action)
+    if cap is None:
+        return
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    usage = _load_usage()
+    count = usage.get(today, {}).get(username, {}).get(action, 0)
+    if count >= cap:
+        print(
+            f"Error: Daily cap reached for {action} ({cap}/day for @{username}). "
+            "Resets after midnight UTC.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+
+def record_action(username: str, action: str) -> None:
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    usage = _load_usage()
+    usage.setdefault(today, {}).setdefault(username, {})[action] = (
+        usage.get(today, {}).get(username, {}).get(action, 0) + 1
+    )
+    _save_usage(usage)
+
+
 def get_client(username: str = IG_USERNAME):
     """Return an authenticated instagrapi Client, using saved session if available."""
+    if not username:
+        print(
+            "Error: IG_USERNAME is not set. Add it to ~/.instagram-agent/.env",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     from instagrapi import Client
+    from instagrapi.exceptions import (
+        BadPassword,
+        ChallengeRequired,
+        FeedbackRequired,
+        LoginRequired,
+        RateLimitError,
+    )
 
+    device = get_or_create_device()
     cl = Client()
-    session_path = SESSIONS_DIR / f"{username}.json"
+    cl.set_device(device["device_settings"])
+    cl.set_user_agent(device["user_agent"])
+    cl.delay_range = [2, 5]
+    cl.request_timeout = 30
 
+    session_path = SESSIONS_DIR / f"{username}.json"
     if session_path.exists():
         try:
             cl.load_settings(session_path)
-            cl.login(username, "")  # re-use session
+            cl.account_info()  # cheap verify — avoids a full re-login roundtrip
             cl.dump_settings(session_path)
             return cl
-        except Exception:
-            pass  # session stale, fall through to password login
+        except ChallengeRequired:
+            print(
+                "Error: Instagram requires verification. Open the Instagram app, complete "
+                "any security prompts, then run `instagram login` to restore the session.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        except (LoginRequired, Exception):
+            pass  # session stale — fall through to password login
 
     password = os.environ.get("IG_PASSWORD")
     if not password:
-        print("Error: IG_PASSWORD not set in .env", file=sys.stderr)
+        print("Error: IG_PASSWORD not set. Add it to ~/.instagram-agent/.env", file=sys.stderr)
         sys.exit(1)
 
-    cl.login(username, password)
+    try:
+        cl.login(username, password)
+    except ChallengeRequired:
+        print(
+            "Error: Instagram requires verification at login. Open the Instagram app, complete "
+            "any security prompts, then try again.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    except BadPassword:
+        print("Error: Instagram password is incorrect. Update IG_PASSWORD in your .env file.", file=sys.stderr)
+        sys.exit(1)
+    except FeedbackRequired as e:
+        print(f"Error: Instagram blocked this action. Try again later. Detail: {e}", file=sys.stderr)
+        sys.exit(1)
+    except RateLimitError:
+        print("Error: Instagram rate limit hit. Wait a few minutes before trying again.", file=sys.stderr)
+        sys.exit(1)
+
     cl.dump_settings(session_path)
     return cl
-
-
-def parse_tags(tag_strings: list[str]) -> list[dict]:
-    """Convert ['@handle', ...] to instagrapi usertag dicts with positions."""
-    if not tag_strings:
-        return []
-    from instagrapi import Client
-    cl = Client()
-    tags = []
-    # Spread tags evenly across the frame
-    positions = [
-        (0.25, 0.25), (0.75, 0.25), (0.25, 0.75), (0.75, 0.75),
-        (0.5, 0.5), (0.15, 0.5), (0.85, 0.5), (0.5, 0.15), (0.5, 0.85),
-        (0.35, 0.35), (0.65, 0.35), (0.35, 0.65), (0.65, 0.65),
-    ]
-    for i, handle in enumerate(tag_strings):
-        handle = handle.lstrip("@")
-        x, y = positions[i % len(positions)]
-        tags.append({"username": handle, "x": x, "y": y})
-    return tags
 
 
 def resolve_media_id(cl, media_ref: str) -> str:
@@ -185,32 +271,32 @@ def cmd_login(args):
     from instagrapi import Client
     from instagrapi.exceptions import TwoFactorRequired
 
+    device = get_or_create_device()
     cl = Client()
+    cl.set_device(device["device_settings"])
+    cl.set_user_agent(device["user_agent"])
+    cl.delay_range = [2, 5]
+
     session_path = SESSIONS_DIR / f"{args.username}.json"
     print(f"Logging in as @{args.username}...")
 
     try:
         cl.login(args.username, password)
     except TwoFactorRequired as e:
-        print("2FA required. Check your phone for an SMS code.")
+        print("2FA required. Check your phone or authenticator app for a code.")
         if args.code:
             code = args.code.strip()
         else:
             code = input("Enter 2FA code: ").strip()
 
-        # Extract two_factor_identifier from the exception
-        two_factor_info = e.args[0] if e.args else {}
-        if isinstance(two_factor_info, str):
-            # Re-attempt with code — instagrapi stores state internally
-            cl.login(args.username, password, verification_code=code)
-        else:
-            identifier = two_factor_info.get("two_factor_identifier", "")
-            cl.two_factor_login(
-                args.username,
-                password,
-                verification_code=code,
-                two_factor_identifier=identifier,
-            )
+        two_factor_info = e.args[0] if e.args and isinstance(e.args[0], dict) else {}
+        identifier = two_factor_info.get("two_factor_identifier", "")
+        cl.two_factor_login(
+            args.username,
+            password,
+            verification_code=code,
+            two_factor_identifier=identifier,
+        )
 
     cl.dump_settings(session_path)
     write_status("idle", "success", f"Logged in as @{args.username}")
@@ -476,7 +562,7 @@ def cmd_read_dms(args):
                 result.append({
                     "thread_id": str(t.id),
                     "users": users,
-                    "last_message": last.text or f"[{last.item_type}]" if last else "",
+                    "last_message": (last.text or f"[{last.item_type}]") if last else "",
                     "last_ts": last.timestamp.isoformat() if last and last.timestamp else "",
                     "unread": t.unread_count or 0,
                 })
@@ -497,11 +583,13 @@ def cmd_send_dm(args):
     handle = args.handle.lstrip("@")
     try:
         cl = get_client(args.username)
+        check_daily_cap(args.username, "sent_dms")
         human_pause("glance")  # navigating to DMs
         user_id = cl.user_id_from_username(handle)
         human_pause("compose")  # opening the compose box
         typing_delay(args.text)  # typing the message at human speed
         thread = cl.direct_send(args.text, user_ids=[user_id])
+        record_action(args.username, "sent_dms")
         write_status("idle", "success", f"DM sent to @{handle}")
         print(json.dumps({
             "sent": True,
@@ -592,7 +680,7 @@ def cmd_status(args):
 
 def main():
     parser = argparse.ArgumentParser(description="Instagram Agent — post, story, reel, tag")
-    parser.add_argument("--username", default=IG_USERNAME, help=f"Instagram account (default: {IG_USERNAME})")
+    parser.add_argument("--username", default=IG_USERNAME, help="Instagram account (overrides IG_USERNAME env var)")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     # login
@@ -604,7 +692,7 @@ def main():
     p_story = subparsers.add_parser("post-story", help="Post a video/image to Stories")
     p_story.add_argument("--path", required=True, help="Path to video or image file")
     p_story.add_argument("--tag", nargs="*", default=[], metavar="@HANDLE",
-                         help="Instagram handles to tag (e.g. @joe.che.official)")
+                         help="Instagram handles to tag")
     p_story.set_defaults(func=cmd_post_story)
 
     # post-feed
@@ -632,7 +720,7 @@ def main():
 
     # get-profile
     p_profile = subparsers.add_parser("get-profile", help="Fetch public profile bio + recent post captions")
-    p_profile.add_argument("handle", metavar="@HANDLE", help="Instagram handle (e.g. @joe.che.official)")
+    p_profile.add_argument("handle", metavar="@HANDLE", help="Instagram handle")
     p_profile.add_argument("--posts", type=int, default=12, help="Number of recent posts to fetch (default: 12, max: 20)")
     p_profile.set_defaults(func=cmd_get_profile)
 
