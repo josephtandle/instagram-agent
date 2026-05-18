@@ -161,3 +161,13 @@ The agent looks for environment variables in this order:
 - Supports video (.mp4, .mov) and image (.jpg, .png) for all post types
 - Supports reading comments and replying to comments on posts/Reels
 - Best use case for Mastermind students: read Instagram conversations, capture leads, organize follow-up, and move opportunities into a CRM
+
+## Export Guidance For IG Reels / Edits
+
+When Joe is exporting a video from Edits for Instagram:
+
+- Use SDR unless the editor delivered a true HDR grade and the HDR preview looks intentional.
+- Use 30 fps by default.
+- Use 60 fps only when the source video is 60 fps or has fast motion that benefits from it.
+- Use 2K or 1080p for direct Instagram publishing. 4K is only worth exporting if Joe wants an archive/master copy too, because Instagram will compress it.
+- Match the original frame rate when possible. If unsure, choose 30 fps.

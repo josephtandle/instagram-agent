@@ -5,7 +5,9 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import random
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -43,6 +45,44 @@ ENV_PATH = load_environment()
 SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
 
 IG_USERNAME = os.environ.get("IG_USERNAME", "joe.che.official")
+
+
+# ── Human timing ──────────────────────────────────────────────────
+# Named delay profiles that mimic realistic human interaction pacing.
+# Err on the side of longer — safety matters more than speed.
+
+_PAUSE_RANGES = {
+    "glance":  (1.5,  4.0),   # brief moment before a quick action
+    "read":    (3.0,  8.0),   # reading a message or scanning a thread
+    "scroll":  (5.0, 14.0),   # browsing through a list (inbox, comments)
+    "think":   (6.0, 16.0),   # pausing before looking at a profile
+    "compose": (4.0, 10.0),   # opening a compose window
+    "post":    (10.0, 28.0),  # reviewing content before hitting Post
+}
+
+
+def human_pause(kind: str = "glance") -> None:
+    lo, hi = _PAUSE_RANGES.get(kind, _PAUSE_RANGES["glance"])
+    duration = random.uniform(lo, hi)
+    print(f"  [human pause: {duration:.1f}s]", flush=True)
+    time.sleep(duration)
+
+
+def typing_delay(text: str) -> None:
+    """Pause proportional to typing ~40 WPM with human variance."""
+    words = max(1, len(text.split()))
+    base_seconds = (words / 40) * 60
+    jitter = random.uniform(0.75, 1.5)
+    duration = max(3.0, base_seconds * jitter)
+    print(f"  [typing delay: {duration:.1f}s for {words} words]", flush=True)
+    time.sleep(duration)
+
+
+def per_item_pause(n: int, kind: str = "read") -> None:
+    """Pause after each item in a list — reading each one takes time."""
+    for _ in range(n):
+        lo, hi = _PAUSE_RANGES.get(kind, _PAUSE_RANGES["read"])
+        time.sleep(random.uniform(lo * 0.5, hi * 0.5))
 
 
 # ── Helpers ───────────────────────────────────────────────────────
@@ -197,6 +237,7 @@ def cmd_post_story(args):
                     user_id = cl.user_id_from_username(handle)
                     mentions.append({"user_id": user_id, "username": handle})
                     print(f"  ✓ @{handle} → {user_id}")
+                    human_pause("glance")  # pause between each tag lookup
                 except Exception as e:
                     print(f"  ✗ @{handle}: {e}", file=sys.stderr)
 
@@ -220,6 +261,7 @@ def cmd_post_story(args):
                     )
                 )
 
+        human_pause("post")  # reviewing story before posting
         if suffix in (".mp4", ".mov", ".avi", ".mkv"):
             print("Uploading video story...")
             media = cl.video_upload_to_story(path, mentions=story_mentions)
@@ -252,6 +294,7 @@ def cmd_post_feed(args):
         caption = args.caption or ""
         suffix = path.suffix.lower()
 
+        human_pause("post")  # reviewing caption and content before posting
         if suffix in (".mp4", ".mov", ".avi", ".mkv"):
             print("Uploading video to feed...")
             media = cl.video_upload(path, caption=caption)
@@ -280,6 +323,7 @@ def cmd_post_reel(args):
     try:
         cl = get_client(args.username)
         caption = args.caption or ""
+        human_pause("post")  # reviewing reel and caption before posting
         print("Uploading reel...")
         media = cl.clip_upload(path, caption=caption)
         write_status("idle", "success", f"Reel posted: {media.pk}")
@@ -307,6 +351,7 @@ def cmd_post_carousel(args):
     try:
         cl = get_client(args.username)
         caption = args.caption or ""
+        human_pause("post")  # reviewing carousel images and caption before posting
         print(f"Uploading carousel ({len(paths)} images)...")
         media = cl.album_upload(paths, caption=caption)
         write_status("idle", "success", f"Carousel posted: {media.pk}")
@@ -322,8 +367,10 @@ def cmd_resolve_user(args):
     """Resolve an Instagram username to a user ID."""
     try:
         cl = get_client(args.username)
-        for handle in args.handles:
+        for i, handle in enumerate(args.handles):
             handle = handle.lstrip("@")
+            if i > 0:
+                human_pause("glance")  # pause between successive lookups
             try:
                 uid = cl.user_id_from_username(handle)
                 print(f"@{handle} → {uid}")
@@ -336,28 +383,25 @@ def cmd_resolve_user(args):
 
 def cmd_get_profile(args):
     """Fetch a public Instagram profile: bio + last N post captions."""
-    import time
-    import random
-
     handle = args.handle.lstrip("@")
     max_posts = min(args.posts, 20)  # hard cap at 20
 
     try:
         cl = get_client(args.username)
 
-        # Call 1: resolve user ID (immediate)
+        # Call 1: resolve user ID
         try:
             user_id = cl.user_id_from_username(handle)
         except Exception as e:
             print(json.dumps({"error": f"User not found: {handle} — {e}"}))
             sys.exit(1)
 
-        # Call 2: get profile info (random 4–10s delay)
-        time.sleep(random.uniform(4.0, 10.0))
+        # Call 2: get profile info
+        human_pause("think")  # landing on a profile page and reading it
         user = cl.user_info(user_id)
 
-        # Call 3: get recent posts captions (random 4–10s delay)
-        time.sleep(random.uniform(4.0, 10.0))
+        # Call 3: get recent posts captions
+        human_pause("scroll")  # scrolling down through the grid
         try:
             medias = cl.user_medias(user_id, amount=max_posts)
         except Exception:
@@ -402,16 +446,14 @@ def cmd_get_profile(args):
 
 def cmd_read_dms(args):
     """Read recent DM threads, optionally filtered to a specific user."""
-    import time
-    import random
-
     try:
         cl = get_client(args.username)
 
         if args.handle:
             handle = args.handle.lstrip("@")
+            human_pause("glance")  # navigating to the search
             user_id = cl.user_id_from_username(handle)
-            time.sleep(random.uniform(2.0, 5.0))
+            human_pause("read")  # opening the thread
             thread = cl.direct_thread_by_participants([user_id])
             messages = []
             for m in thread.messages[:args.limit]:
@@ -421,9 +463,11 @@ def cmd_read_dms(args):
                     "timestamp": m.timestamp.isoformat() if m.timestamp else "",
                     "item_type": m.item_type,
                 })
+            # Read each message at a human pace
+            per_item_pause(len(messages), "read")
             print(json.dumps({"handle": handle, "messages": messages}, ensure_ascii=False, indent=2))
         else:
-            time.sleep(random.uniform(2.0, 5.0))
+            human_pause("scroll")  # opening inbox and scanning it
             threads = cl.direct_threads(amount=args.limit)
             result = []
             for t in threads:
@@ -436,6 +480,8 @@ def cmd_read_dms(args):
                     "last_ts": last.timestamp.isoformat() if last and last.timestamp else "",
                     "unread": t.unread_count or 0,
                 })
+            # Scan each thread preview at a human pace
+            per_item_pause(len(result), "read")
             print(json.dumps(result, ensure_ascii=False, indent=2))
 
         write_status("idle", "success", "DMs read")
@@ -448,14 +494,13 @@ def cmd_read_dms(args):
 
 def cmd_send_dm(args):
     """Send a DM to an Instagram user."""
-    import time
-    import random
-
     handle = args.handle.lstrip("@")
     try:
         cl = get_client(args.username)
+        human_pause("glance")  # navigating to DMs
         user_id = cl.user_id_from_username(handle)
-        time.sleep(random.uniform(3.0, 8.0))
+        human_pause("compose")  # opening the compose box
+        typing_delay(args.text)  # typing the message at human speed
         thread = cl.direct_send(args.text, user_ids=[user_id])
         write_status("idle", "success", f"DM sent to @{handle}")
         print(json.dumps({
@@ -472,13 +517,10 @@ def cmd_send_dm(args):
 
 def cmd_read_comments(args):
     """Read recent comments on an Instagram media item."""
-    import time
-    import random
-
     try:
         cl = get_client(args.username)
         media_id = resolve_media_id(cl, args.media)
-        time.sleep(random.uniform(2.0, 5.0))
+        human_pause("read")  # opening the post and scrolling to comments
         comments = cl.media_comments(media_id, amount=args.limit)
         result = []
         for comment in comments:
@@ -497,6 +539,8 @@ def cmd_read_comments(args):
                 "user_id": str(getattr(user, "pk", "")) if user else "",
             })
 
+        # Read each comment at a human pace
+        per_item_pause(len(result), "read")
         print(json.dumps({
             "media": args.media,
             "media_id": media_id,
@@ -513,14 +557,12 @@ def cmd_read_comments(args):
 
 def cmd_reply_comment(args):
     """Reply to an Instagram comment or add a top-level comment."""
-    import time
-    import random
-
     try:
         cl = get_client(args.username)
         media_id = resolve_media_id(cl, args.media)
         reply_to = int(args.comment_id) if args.comment_id else None
-        time.sleep(random.uniform(3.0, 8.0))
+        human_pause("read")  # reading the comment before replying
+        typing_delay(args.text)  # typing the reply at human speed
         comment = cl.media_comment(media_id, args.text, replied_to_comment_id=reply_to)
         write_status("idle", "success", f"Comment posted on {media_id}")
         print(json.dumps({
