@@ -555,7 +555,7 @@ def cmd_read_dms(args):
                     "users": users,
                     "last_message": (last.text or f"[{last.item_type}]") if last else "",
                     "last_ts": last.timestamp.isoformat() if last and last.timestamp else "",
-                    "unread": t.unread_count or 0,
+                    "unread": getattr(t, "unread_count", None) or 0,
                 })
             print(json.dumps(result, ensure_ascii=False, indent=2))
 
