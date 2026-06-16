@@ -10,17 +10,28 @@ import sys
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
+from zoneinfo import ZoneInfo
 
 AGENT_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = AGENT_DIR / "data"
 SESSIONS_DIR = DATA_DIR / "sessions"
 STATUS_PATH = AGENT_DIR / "status.json"
+HEALTH_PATH = DATA_DIR / "health.json"
 CONFIG_DIR = Path.home() / ".instagram-agent"
 DEVICE_PATH = CONFIG_DIR / "device.json"
 USAGE_PATH = DATA_DIR / "usage.json"
 
 DAILY_CAPS = {
     "sent_dms": 20,
+    "profile_reads": 150,
+    "dm_thread_reads": 80,
+    "comment_reads": 120,
+    "user_resolves": 120,
+    "comment_writes": 25,
+    "content_posts": 12,
 }
 
 from dotenv import load_dotenv
@@ -51,6 +62,10 @@ ENV_PATH = load_environment()
 SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
 
 IG_USERNAME = os.environ.get("IG_USERNAME", "")
+META_IG_ACCESS_TOKEN = os.environ.get("META_IG_ACCESS_TOKEN", "")
+META_IG_ACCOUNT_ID = os.environ.get("META_IG_ACCOUNT_ID", "")
+BALI_TZ = ZoneInfo("Asia/Makassar")
+GRAPH_API_BASE = "https://graph.facebook.com/v19.0"
 
 
 # ── Human timing ──────────────────────────────────────────────────
@@ -136,29 +151,157 @@ def _save_usage(usage: dict) -> None:
     USAGE_PATH.write_text(json.dumps(pruned, indent=2) + "\n")
 
 
-def check_daily_cap(username: str, action: str) -> None:
+def _parse_iso_datetime(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _load_health() -> dict:
+    try:
+        return json.loads(HEALTH_PATH.read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {"accounts": {}}
+
+
+def _save_health(health: dict) -> None:
+    HEALTH_PATH.write_text(json.dumps(health, indent=2) + "\n")
+
+
+def _account_health(username: str) -> dict:
+    health = _load_health()
+    return health.setdefault("accounts", {}).setdefault(username, {})
+
+
+def _write_account_health(username: str, payload: dict) -> None:
+    health = _load_health()
+    health.setdefault("accounts", {})[username] = payload
+    _save_health(health)
+
+
+def set_account_cooldown(username: str, seconds: int, reason: str, source: str, trigger: str) -> dict:
+    until = _utc_now() + timedelta(seconds=max(60, seconds))
+    payload = _account_health(username)
+    payload.update({
+        "blocked_until": until.isoformat(),
+        "reason": reason,
+        "source": source,
+        "trigger": trigger,
+        "updated_at": _utc_now().isoformat(),
+    })
+    _write_account_health(username, payload)
+    return payload
+
+
+def clear_account_cooldown(username: str) -> None:
+    payload = _account_health(username)
+    payload.pop("blocked_until", None)
+    payload.pop("reason", None)
+    payload.pop("source", None)
+    payload.pop("trigger", None)
+    payload["updated_at"] = _utc_now().isoformat()
+    _write_account_health(username, payload)
+
+
+def get_active_cooldown(username: str) -> dict | None:
+    payload = _account_health(username)
+    blocked_until = _parse_iso_datetime(payload.get("blocked_until"))
+    if not blocked_until:
+        return None
+    now = _utc_now()
+    if blocked_until <= now:
+        clear_account_cooldown(username)
+        return None
+    remaining = int((blocked_until - now).total_seconds())
+    return {
+        "blocked_until": blocked_until.isoformat(),
+        "remaining_seconds": remaining,
+        "reason": payload.get("reason", "cooldown_active"),
+        "source": payload.get("source", "instagram"),
+        "trigger": payload.get("trigger", ""),
+    }
+
+
+def check_daily_cap(username: str, action: str, amount: int = 1) -> None:
     cap = DAILY_CAPS.get(action)
     if cap is None:
         return
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     usage = _load_usage()
     count = usage.get(today, {}).get(username, {}).get(action, 0)
-    if count >= cap:
+    if count + amount > cap:
         print(
-            f"Error: Daily cap reached for {action} ({cap}/day for @{username}). "
+            f"Error: Daily cap reached for {action} ({count}/{cap} used for @{username}). "
             "Resets after midnight UTC.",
             file=sys.stderr,
         )
         sys.exit(1)
 
 
-def record_action(username: str, action: str) -> None:
+def record_action(username: str, action: str, amount: int = 1) -> None:
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     usage = _load_usage()
     usage.setdefault(today, {}).setdefault(username, {})[action] = (
-        usage.get(today, {}).get(username, {}).get(action, 0) + 1
+        usage.get(today, {}).get(username, {}).get(action, 0) + amount
     )
     _save_usage(usage)
+
+
+def enforce_action_guard(username: str, action: str) -> None:
+    cooldown = get_active_cooldown(username)
+    if cooldown:
+        print(
+            json.dumps({
+                "error": "instagram_account_cooling_down",
+                "username": username,
+                **cooldown,
+            }, ensure_ascii=False, indent=2),
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    check_daily_cap(username, action)
+
+
+def _protective_cooldown_for_error(exc: Exception) -> tuple[int, str, str] | None:
+    name = exc.__class__.__name__.lower()
+    message = str(exc).lower()
+    if "challenge" in name or "challenge" in message:
+        return (24 * 3600, "challenge_required", "challenge")
+    if "feedbackrequired" in name or "feedback required" in message or "feedback_required" in message:
+        return (12 * 3600, "feedback_blocked", "feedback")
+    if "ratelimit" in name or "rate limit" in message or "429" in message:
+        return (6 * 3600, "rate_limited", "rate_limit")
+    if "403 forbidden" in message or "forbidden" in message:
+        return (6 * 3600, "forbidden_response", "forbidden")
+    if "please wait" in message or "try again later" in message:
+        return (4 * 3600, "temporary_throttle", "throttle")
+    return None
+
+
+def apply_protective_cooldown(username: str, source: str, exc: Exception) -> dict | None:
+    policy = _protective_cooldown_for_error(exc)
+    if not policy:
+        return None
+    seconds, reason, trigger = policy
+    return set_account_cooldown(username, seconds, reason, source, trigger)
+
+
+def mark_account_success(username: str, source: str) -> None:
+    payload = _account_health(username)
+    payload["last_success_at"] = _utc_now().isoformat()
+    payload["last_success_source"] = source
+    payload["updated_at"] = _utc_now().isoformat()
+    _write_account_health(username, payload)
 
 
 def get_client(username: str = IG_USERNAME):
@@ -192,8 +335,10 @@ def get_client(username: str = IG_USERNAME):
             cl.load_settings(session_path)
             cl.account_info()  # cheap verify — avoids a full re-login roundtrip
             cl.dump_settings(session_path)
+            mark_account_success(username, "session_reuse")
             return cl
         except ChallengeRequired:
+            apply_protective_cooldown(username, "session_reuse", ChallengeRequired("challenge required"))
             print(
                 "Error: Instagram requires verification. Open the Instagram app, complete "
                 "any security prompts, then run `instagram login` to restore the session.",
@@ -211,6 +356,7 @@ def get_client(username: str = IG_USERNAME):
     try:
         cl.login(username, password)
     except ChallengeRequired:
+        apply_protective_cooldown(username, "login", ChallengeRequired("challenge required"))
         print(
             "Error: Instagram requires verification at login. Open the Instagram app, complete "
             "any security prompts, then try again.",
@@ -221,13 +367,16 @@ def get_client(username: str = IG_USERNAME):
         print("Error: Instagram password is incorrect. Update IG_PASSWORD in your .env file.", file=sys.stderr)
         sys.exit(1)
     except FeedbackRequired as e:
+        apply_protective_cooldown(username, "login", e)
         print(f"Error: Instagram blocked this action. Try again later. Detail: {e}", file=sys.stderr)
         sys.exit(1)
     except RateLimitError:
+        apply_protective_cooldown(username, "login", RateLimitError("rate limit"))
         print("Error: Instagram rate limit hit. Wait a few minutes before trying again.", file=sys.stderr)
         sys.exit(1)
 
     cl.dump_settings(session_path)
+    mark_account_success(username, "login")
     return cl
 
 
@@ -250,6 +399,206 @@ def resolve_media_id(cl, media_ref: str) -> str:
 
     media_pk = cl.media_pk_from_code(normalized)
     return cl.media_id(media_pk)
+
+
+def _window_payload(start: datetime, end: datetime, label: str) -> dict:
+    return {
+        "label": label,
+        "start": start.isoformat(),
+        "end": end.isoformat(),
+        "posts": 0,
+        "views": 0,
+        "comments": 0,
+        "likes": 0,
+        "hasViewData": False,
+    }
+
+
+def _get_official_windows(now: datetime | None = None) -> dict:
+    now_bali = (now or datetime.now(BALI_TZ)).astimezone(BALI_TZ)
+    today_start = now_bali.replace(hour=0, minute=0, second=0, microsecond=0)
+    yesterday_start = today_start - timedelta(days=1)
+    days_since_monday = today_start.weekday()
+    this_monday = today_start - timedelta(days=days_since_monday)
+    last_monday = this_monday - timedelta(days=7)
+    prior_monday = this_monday - timedelta(days=14)
+    month_start = today_start.replace(day=1)
+
+    return {
+        "yesterday": _window_payload(yesterday_start, today_start, "yesterday"),
+        "completedWeek": _window_payload(last_monday, this_monday, "last completed Monday-to-Monday week"),
+        "previousWeek": _window_payload(prior_monday, last_monday, "previous Monday-to-Monday week"),
+        "monthToDate": _window_payload(month_start, now_bali, "month to date"),
+    }
+
+
+def _parse_meta_datetime(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        normalized = value.replace("Z", "+00:00")
+        parsed = datetime.fromisoformat(normalized)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(BALI_TZ)
+    except ValueError:
+        return None
+
+
+def _graph_get(path_or_url: str, params: dict | None = None) -> dict:
+    params = dict(params or {})
+    params["access_token"] = META_IG_ACCESS_TOKEN
+    if path_or_url.startswith("http://") or path_or_url.startswith("https://"):
+        url = path_or_url
+    else:
+        url = f"{GRAPH_API_BASE}/{path_or_url.lstrip('/')}"
+        url = f"{url}?{urlencode(params)}"
+
+    req = Request(url, headers={"User-Agent": "myos-instagram-agent/1.0"})
+    try:
+        with urlopen(req, timeout=30) as res:
+            return json.loads(res.read().decode("utf-8"))
+    except HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        try:
+            detail = json.loads(body).get("error", {}).get("message", body)
+        except json.JSONDecodeError:
+            detail = body
+        raise RuntimeError(f"Meta Graph API error: {detail}") from exc
+    except URLError as exc:
+        raise RuntimeError(f"Meta Graph API request failed: {exc.reason}") from exc
+
+
+def _fetch_media_view_count(media_id: str) -> int | None:
+    for metric in ("views", "plays"):
+        try:
+            data = _graph_get(f"{media_id}/insights", {"metric": metric})
+        except Exception:
+            continue
+        entry = next((item for item in data.get("data", []) if item.get("name") == metric), None)
+        value = (entry.get("values") or [{}])[0].get("value") if entry else None
+        if value is None:
+            continue
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _add_media_to_window(window: dict, item: dict) -> None:
+    window["posts"] += 1
+    window["comments"] += int(item.get("comments") or 0)
+    window["likes"] += int(item.get("likes") or 0)
+    if isinstance(item.get("views"), int):
+        window["views"] += item["views"]
+        window["hasViewData"] = True
+
+
+def _summarize_media(media: list[dict], windows: dict) -> dict:
+    for item in media:
+        published_at = item.get("publishedAt")
+        if not published_at:
+            continue
+        for window in windows.values():
+            start = datetime.fromisoformat(window["start"])
+            end = datetime.fromisoformat(window["end"])
+            if start <= published_at < end:
+                _add_media_to_window(window, item)
+    return windows
+
+
+def cmd_official_stats(args):
+    """Read Instagram account stats via the official Meta Graph API only."""
+    if not META_IG_ACCESS_TOKEN or not META_IG_ACCOUNT_ID:
+        print(json.dumps({
+            "status": "unavailable",
+            "source": "meta_graph_api",
+            "readOnly": True,
+            "configured": {
+                "META_IG_ACCESS_TOKEN": bool(META_IG_ACCESS_TOKEN),
+                "META_IG_ACCOUNT_ID": bool(META_IG_ACCOUNT_ID),
+            },
+            "error": "META_IG_ACCESS_TOKEN and META_IG_ACCOUNT_ID are required for official read-only Instagram stats.",
+        }, indent=2))
+        return
+
+    try:
+        account = _graph_get(
+            META_IG_ACCOUNT_ID,
+            {"fields": "id,username,name,followers_count,media_count"},
+        )
+        windows = _get_official_windows()
+        oldest_needed = min(datetime.fromisoformat(w["start"]) for w in windows.values())
+        media = []
+        next_url = None
+        fields = "id,timestamp,media_type,like_count,comments_count,permalink"
+
+        for page in range(4):
+            if next_url:
+                data = _graph_get(next_url)
+            else:
+                data = _graph_get(
+                    f"{META_IG_ACCOUNT_ID}/media",
+                    {"fields": fields, "limit": "100"},
+                )
+
+            for raw in data.get("data", []):
+                published_at = _parse_meta_datetime(raw.get("timestamp"))
+                if not published_at:
+                    continue
+                if published_at < oldest_needed:
+                    continue
+                media.append({
+                    "id": raw.get("id", ""),
+                    "publishedAt": published_at,
+                    "mediaType": raw.get("media_type", ""),
+                    "comments": int(raw.get("comments_count") or 0),
+                    "likes": int(raw.get("like_count") or 0),
+                    "permalink": raw.get("permalink", ""),
+                    "views": _fetch_media_view_count(raw.get("id", "")),
+                })
+
+            oldest_on_page = media[-1]["publishedAt"] if media else None
+            if oldest_on_page and oldest_on_page < oldest_needed:
+                break
+            next_url = data.get("paging", {}).get("next")
+            if not next_url:
+                break
+
+        summarized = _summarize_media(media, windows)
+        result = {
+            "status": "ok",
+            "source": "meta_graph_api",
+            "readOnly": True,
+            "generatedAt": datetime.now(timezone.utc).isoformat(),
+            "account": {
+                "id": account.get("id", META_IG_ACCOUNT_ID),
+                "username": account.get("username") or account.get("name") or "",
+                "followers": int(account.get("followers_count") or 0),
+                "media": int(account.get("media_count") or 0),
+            },
+            "windows": summarized,
+            "mediaFetched": len(media),
+            "media": [
+                {
+                    **item,
+                    "publishedAt": item["publishedAt"].isoformat(),
+                }
+                for item in media[:25]
+            ] if args.include_media else [],
+        }
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        write_status("idle", "success", "Official Instagram stats fetched")
+    except Exception as e:
+        write_status("idle", "error", str(e))
+        print(json.dumps({
+            "status": "error",
+            "source": "meta_graph_api",
+            "readOnly": True,
+            "error": str(e),
+        }, ensure_ascii=False, indent=2))
+        sys.exit(1)
 
 
 # ── Commands ──────────────────────────────────────────────────────
@@ -290,8 +639,14 @@ def cmd_login(args):
             verification_code=code,
             two_factor_identifier=identifier,
         )
+    except Exception as e:
+        apply_protective_cooldown(args.username, "login", e)
+        write_status("idle", "error", str(e))
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
 
     cl.dump_settings(session_path)
+    mark_account_success(args.username, "login")
     write_status("idle", "success", f"Logged in as @{args.username}")
     print(f"Session saved to {session_path}")
 
@@ -305,6 +660,7 @@ def cmd_post_story(args):
 
     write_status("working", None, f"Posting story: {path.name}")
     try:
+        enforce_action_guard(args.username, "content_posts")
         cl = get_client(args.username)
 
         mentions = []
@@ -349,12 +705,15 @@ def cmd_post_story(args):
             media = cl.photo_upload_to_story(path, mentions=story_mentions)
 
         write_status("idle", "success", f"Story posted: {media.pk}")
+        record_action(args.username, "content_posts")
+        mark_account_success(args.username, "post_story")
         print(f"\nStory posted successfully!")
         print(f"Media ID: {media.pk}")
         if mentions:
             print(f"Tagged: {', '.join('@' + m['username'] for m in mentions)}")
 
     except Exception as e:
+        apply_protective_cooldown(args.username, "post_story", e)
         write_status("idle", "error", str(e))
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
@@ -369,6 +728,7 @@ def cmd_post_feed(args):
 
     write_status("working", None, f"Posting to feed: {path.name}")
     try:
+        enforce_action_guard(args.username, "content_posts")
         cl = get_client(args.username)
         caption = args.caption or ""
         suffix = path.suffix.lower()
@@ -382,10 +742,13 @@ def cmd_post_feed(args):
             media = cl.photo_upload(path, caption=caption)
 
         write_status("idle", "success", f"Feed post: {media.pk}")
+        record_action(args.username, "content_posts")
+        mark_account_success(args.username, "post_feed")
         print(f"\nFeed post published!")
         print(f"Media ID: {media.pk}")
 
     except Exception as e:
+        apply_protective_cooldown(args.username, "post_feed", e)
         write_status("idle", "error", str(e))
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
@@ -400,16 +763,20 @@ def cmd_post_reel(args):
 
     write_status("working", None, f"Posting reel: {path.name}")
     try:
+        enforce_action_guard(args.username, "content_posts")
         cl = get_client(args.username)
         caption = args.caption or ""
         human_pause("post")  # reviewing reel and caption before posting
         print("Uploading reel...")
         media = cl.clip_upload(path, caption=caption)
         write_status("idle", "success", f"Reel posted: {media.pk}")
+        record_action(args.username, "content_posts")
+        mark_account_success(args.username, "post_reel")
         print(f"\nReel posted!")
         print(f"Media ID: {media.pk}")
 
     except Exception as e:
+        apply_protective_cooldown(args.username, "post_reel", e)
         write_status("idle", "error", str(e))
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
@@ -428,15 +795,19 @@ def cmd_post_carousel(args):
 
     write_status("working", None, f"Posting carousel: {len(paths)} images")
     try:
+        enforce_action_guard(args.username, "content_posts")
         cl = get_client(args.username)
         caption = args.caption or ""
         human_pause("post")  # reviewing carousel images and caption before posting
         print(f"Uploading carousel ({len(paths)} images)...")
         media = cl.album_upload(paths, caption=caption)
         write_status("idle", "success", f"Carousel posted: {media.pk}")
+        record_action(args.username, "content_posts")
+        mark_account_success(args.username, "post_carousel")
         print(f"\nCarousel posted!")
         print(f"Media ID: {media.pk}")
     except Exception as e:
+        apply_protective_cooldown(args.username, "post_carousel", e)
         write_status("idle", "error", str(e))
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
@@ -445,6 +816,7 @@ def cmd_post_carousel(args):
 def cmd_resolve_user(args):
     """Resolve an Instagram username to a user ID."""
     try:
+        enforce_action_guard(args.username, "user_resolves")
         cl = get_client(args.username)
         for i, handle in enumerate(args.handles):
             handle = handle.lstrip("@")
@@ -455,7 +827,10 @@ def cmd_resolve_user(args):
                 print(f"@{handle} → {uid}")
             except Exception as e:
                 print(f"@{handle} → ERROR: {e}", file=sys.stderr)
+        record_action(args.username, "user_resolves", amount=max(1, len(args.handles)))
+        mark_account_success(args.username, "resolve_user")
     except Exception as e:
+        apply_protective_cooldown(args.username, "resolve_user", e)
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
 
@@ -466,6 +841,7 @@ def cmd_get_profile(args):
     max_posts = min(args.posts, 20)  # hard cap at 20
 
     try:
+        enforce_action_guard(args.username, "profile_reads")
         cl = get_client(args.username)
 
         # Call 1: resolve user ID
@@ -516,8 +892,11 @@ def cmd_get_profile(args):
 
         print(json.dumps(result, ensure_ascii=False, indent=2))
         write_status("idle", "success", f"Profile fetched: @{handle}")
+        record_action(args.username, "profile_reads")
+        mark_account_success(args.username, "get_profile")
 
     except Exception as e:
+        apply_protective_cooldown(args.username, "get_profile", e)
         write_status("idle", "error", str(e))
         print(json.dumps({"error": str(e)}))
         sys.exit(1)
@@ -526,6 +905,7 @@ def cmd_get_profile(args):
 def cmd_read_dms(args):
     """Read recent DM threads, optionally filtered to a specific user."""
     try:
+        enforce_action_guard(args.username, "dm_thread_reads")
         cl = get_client(args.username)
 
         if args.handle:
@@ -560,8 +940,11 @@ def cmd_read_dms(args):
             print(json.dumps(result, ensure_ascii=False, indent=2))
 
         write_status("idle", "success", "DMs read")
+        record_action(args.username, "dm_thread_reads")
+        mark_account_success(args.username, "read_dms")
 
     except Exception as e:
+        apply_protective_cooldown(args.username, "read_dms", e)
         write_status("idle", "error", str(e))
         print(json.dumps({"error": str(e)}))
         sys.exit(1)
@@ -572,13 +955,14 @@ def cmd_send_dm(args):
     handle = args.handle.lstrip("@")
     try:
         cl = get_client(args.username)
-        check_daily_cap(args.username, "sent_dms")
+        enforce_action_guard(args.username, "sent_dms")
         human_pause("glance")  # navigating to DMs
         user_id = cl.user_id_from_username(handle)
         human_pause("compose")  # opening the compose box
         typing_delay(args.text)  # typing the message at human speed
         thread = cl.direct_send(args.text, user_ids=[user_id])
         record_action(args.username, "sent_dms")
+        mark_account_success(args.username, "send_dm")
         write_status("idle", "success", f"DM sent to @{handle}")
         print(json.dumps({
             "sent": True,
@@ -587,6 +971,7 @@ def cmd_send_dm(args):
             "text": args.text,
         }, ensure_ascii=False, indent=2))
     except Exception as e:
+        apply_protective_cooldown(args.username, "send_dm", e)
         write_status("idle", "error", str(e))
         print(json.dumps({"error": str(e)}))
         sys.exit(1)
@@ -595,6 +980,7 @@ def cmd_send_dm(args):
 def cmd_read_comments(args):
     """Read recent comments on an Instagram media item."""
     try:
+        enforce_action_guard(args.username, "comment_reads")
         cl = get_client(args.username)
         media_id = resolve_media_id(cl, args.media)
         human_pause("read")  # opening the post and scrolling to comments
@@ -623,8 +1009,11 @@ def cmd_read_comments(args):
             "comments": result,
         }, ensure_ascii=False, indent=2))
         write_status("idle", "success", f"Comments read: {media_id}")
+        record_action(args.username, "comment_reads")
+        mark_account_success(args.username, "read_comments")
 
     except Exception as e:
+        apply_protective_cooldown(args.username, "read_comments", e)
         write_status("idle", "error", str(e))
         print(json.dumps({"error": str(e)}))
         sys.exit(1)
@@ -633,6 +1022,7 @@ def cmd_read_comments(args):
 def cmd_reply_comment(args):
     """Reply to an Instagram comment or add a top-level comment."""
     try:
+        enforce_action_guard(args.username, "comment_writes")
         cl = get_client(args.username)
         media_id = resolve_media_id(cl, args.media)
         reply_to = int(args.comment_id) if args.comment_id else None
@@ -640,6 +1030,8 @@ def cmd_reply_comment(args):
         typing_delay(args.text)  # typing the reply at human speed
         comment = cl.media_comment(media_id, args.text, replied_to_comment_id=reply_to)
         write_status("idle", "success", f"Comment posted on {media_id}")
+        record_action(args.username, "comment_writes")
+        mark_account_success(args.username, "reply_comment")
         print(json.dumps({
             "sent": True,
             "media": args.media,
@@ -649,6 +1041,7 @@ def cmd_reply_comment(args):
             "text": getattr(comment, "text", args.text) or args.text,
         }, ensure_ascii=False, indent=2))
     except Exception as e:
+        apply_protective_cooldown(args.username, "reply_comment", e)
         write_status("idle", "error", str(e))
         print(json.dumps({"error": str(e)}))
         sys.exit(1)
@@ -658,7 +1051,17 @@ def cmd_status(args):
     """Show current agent status."""
     try:
         data = json.loads(STATUS_PATH.read_text())
-        print(json.dumps(data, indent=2))
+        today = _utc_now().strftime("%Y-%m-%d")
+        usage = _load_usage().get(today, {}).get(args.username or IG_USERNAME, {})
+        health = _account_health(args.username or IG_USERNAME)
+        active_cooldown = get_active_cooldown(args.username or IG_USERNAME)
+        print(json.dumps({
+            **data,
+            "account": args.username or IG_USERNAME,
+            "todayUsage": usage,
+            "health": health,
+            "activeCooldown": active_cooldown,
+        }, indent=2))
     except FileNotFoundError:
         print("No status file found.")
 
@@ -729,6 +1132,18 @@ def main():
     p_read_comments.add_argument("media", help="Media ID, shortcode, or Instagram post URL")
     p_read_comments.add_argument("--limit", type=int, default=20, help="Number of comments to fetch (default: 20)")
     p_read_comments.set_defaults(func=cmd_read_comments)
+
+    # official-stats
+    p_official_stats = subparsers.add_parser(
+        "official-stats",
+        help="Read account, yesterday, weekly, and month-to-date stats via Meta Graph API",
+    )
+    p_official_stats.add_argument(
+        "--include-media",
+        action="store_true",
+        help="Include up to 25 fetched media rows in the JSON output",
+    )
+    p_official_stats.set_defaults(func=cmd_official_stats)
 
     # reply-comment
     p_reply_comment = subparsers.add_parser("reply-comment", help="Reply to a comment on a post or reel")

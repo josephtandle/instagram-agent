@@ -7,6 +7,7 @@ A local CLI agent for managing Instagram — read DMs, research profiles, read c
 - Read DM threads (inbox or one-on-one)
 - Send DMs
 - Fetch any public profile: bio, follower count, recent post captions
+- Fetch official read-only account stats through Meta Graph API when configured
 - Read and reply to comments on posts and Reels
 - Post to Feed, Stories, Reels, and carousels
 - Resolve handles to user IDs
@@ -136,6 +137,14 @@ Note: limited to 20 DMs per day per account.
 instagram get-profile @someuser --posts 12
 ```
 
+### Read official stats
+
+Uses Meta Graph API only. This is the safe reporting path for daily/weekly views and comments.
+
+```bash
+instagram official-stats
+```
+
 ### Post a Story
 
 ```bash
@@ -198,6 +207,8 @@ instagram status
 | `IG_USERNAME` | Yes | Your Instagram handle (set in `~/.instagram-agent/.env`) |
 | `IG_PASSWORD` | Yes (first login) | Instagram password |
 | `INSTAGRAM_AGENT_ENV` | No | Custom path to a `.env` file |
+| `META_IG_ACCESS_TOKEN` | For official stats | Meta Graph API token with read-only Instagram insights access |
+| `META_IG_ACCOUNT_ID` | For official stats | Instagram Business/Creator account ID for Meta Graph API |
 
 The agent looks for credentials in this order:
 

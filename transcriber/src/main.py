@@ -7,7 +7,7 @@ import json
 import os
 import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -21,10 +21,13 @@ AGENT_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = AGENT_DIR / "data"
 VIDEOS_DIR = DATA_DIR / "videos"
 TRANSCRIPTS_DIR = DATA_DIR / "transcripts"
+SESSIONS_DIR = DATA_DIR / "sessions"
+HEALTH_PATH = DATA_DIR / "health.json"
 STATUS_PATH = AGENT_DIR / "status.json"
 
 VIDEOS_DIR.mkdir(parents=True, exist_ok=True)
 TRANSCRIPTS_DIR.mkdir(parents=True, exist_ok=True)
+SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def write_status(status: str, result=None, message=None):
@@ -57,13 +60,116 @@ def extract_shortcode(url: str) -> str:
     raise ValueError(f"Could not extract shortcode from URL: {url}")
 
 
-def download_post_video(url: str) -> tuple[Path, dict]:
-    """Download a video from an Instagram post URL. Returns (video_path, metadata)."""
-    import instaloader
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
 
-    shortcode = extract_shortcode(url)
-    video_dir = VIDEOS_DIR / shortcode
-    video_dir.mkdir(parents=True, exist_ok=True)
+
+def _parse_iso_datetime(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _load_health() -> dict:
+    try:
+        return json.loads(HEALTH_PATH.read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def _save_health(health: dict) -> None:
+    HEALTH_PATH.write_text(json.dumps(health, indent=2) + "\n")
+
+
+def set_download_cooldown(seconds: int, reason: str, trigger: str) -> dict:
+    health = _load_health()
+    health.update({
+        "blocked_until": (_utc_now() + timedelta(seconds=max(60, seconds))).isoformat(),
+        "reason": reason,
+        "trigger": trigger,
+        "updated_at": _utc_now().isoformat(),
+    })
+    _save_health(health)
+    return health
+
+
+def clear_download_cooldown() -> None:
+    health = _load_health()
+    for key in ("blocked_until", "reason", "trigger"):
+        health.pop(key, None)
+    health["updated_at"] = _utc_now().isoformat()
+    _save_health(health)
+
+
+def mark_download_success(source: str) -> None:
+    health = _load_health()
+    health["last_success_at"] = _utc_now().isoformat()
+    health["last_success_source"] = source
+    for key in ("blocked_until", "reason", "trigger"):
+        health.pop(key, None)
+    health["updated_at"] = _utc_now().isoformat()
+    _save_health(health)
+
+
+def get_active_download_cooldown() -> dict | None:
+    health = _load_health()
+    blocked_until = _parse_iso_datetime(health.get("blocked_until"))
+    if not blocked_until:
+        return None
+    now = _utc_now()
+    if blocked_until <= now:
+        clear_download_cooldown()
+        return None
+    return {
+        "blocked_until": blocked_until.isoformat(),
+        "remaining_seconds": int((blocked_until - now).total_seconds()),
+        "reason": health.get("reason", "cooldown_active"),
+        "trigger": health.get("trigger", ""),
+    }
+
+
+def enforce_download_guard() -> None:
+    cooldown = get_active_download_cooldown()
+    if cooldown:
+        raise RuntimeError(
+            f"Instagram transcriber cooling down until {cooldown['blocked_until']} "
+            f"({cooldown['reason']}, trigger={cooldown['trigger']})"
+        )
+
+
+def _cooldown_for_error(exc: Exception) -> tuple[int, str, str] | None:
+    message = str(exc).lower()
+    if "403 forbidden" in message or "forbidden" in message:
+        return (12 * 3600, "forbidden_response", "forbidden")
+    if "429" in message or "rate limit" in message or "too many requests" in message:
+        return (8 * 3600, "rate_limited", "rate_limit")
+    if "login required" in message or "checkpoint" in message or "challenge" in message:
+        return (24 * 3600, "authentication_challenge", "challenge")
+    if "please wait" in message or "try again later" in message:
+        return (6 * 3600, "temporary_throttle", "throttle")
+    return None
+
+
+def apply_download_cooldown(exc: Exception) -> dict | None:
+    policy = _cooldown_for_error(exc)
+    if not policy:
+        return None
+    seconds, reason, trigger = policy
+    return set_download_cooldown(seconds, reason, trigger)
+
+
+def _session_path(username: str) -> Path:
+    return SESSIONS_DIR / f"{username}.session"
+
+
+def build_loader():
+    import instaloader
 
     loader = instaloader.Instaloader(
         download_videos=True,
@@ -72,29 +178,60 @@ def download_post_video(url: str) -> tuple[Path, dict]:
         download_comments=False,
         save_metadata=False,
         compress_json=False,
-        dirname_pattern=str(video_dir),
-        filename_pattern="{shortcode}",
     )
 
     ig_username = os.environ.get("IG_USERNAME")
     ig_password = os.environ.get("IG_PASSWORD")
-    if ig_username and ig_password:
+    if not ig_username:
+        raise RuntimeError(
+            "IG_USERNAME is required for transcriber downloads. Anonymous Instagram downloads are disabled to reduce block risk."
+        )
+
+    session_path = _session_path(ig_username)
+    if session_path.exists():
         try:
-            loader.login(ig_username, ig_password)
-        except instaloader.exceptions.ConnectionException as e:
-            print(f"Warning: Login failed ({e}), continuing anonymously", file=sys.stderr)
+            loader.load_session_from_file(ig_username, filename=str(session_path))
+            return loader
+        except Exception:
+            pass
+
+    if not ig_password:
+        raise RuntimeError(
+            "No reusable transcriber session found and IG_PASSWORD is unavailable. "
+            "Refusing anonymous fallback to reduce block risk."
+        )
+
+    loader.login(ig_username, ig_password)
+    loader.save_session_to_file(filename=str(session_path))
+    return loader
+
+
+def download_post_video(url: str) -> tuple[Path, dict]:
+    """Download a video from an Instagram post URL. Returns (video_path, metadata)."""
+    enforce_download_guard()
+    shortcode = extract_shortcode(url)
+    video_dir = VIDEOS_DIR / shortcode
+    video_dir.mkdir(parents=True, exist_ok=True)
+
+    loader = build_loader()
+    loader.dirname_pattern = str(video_dir)
+    loader.filename_pattern = "{shortcode}"
 
     try:
+        import instaloader
         post = instaloader.Post.from_shortcode(loader.context, shortcode)
-    except instaloader.exceptions.LoginRequiredException:
-        raise RuntimeError("Profile is private. Login required.")
     except Exception as e:
+        apply_download_cooldown(e)
         raise RuntimeError(f"Could not load post: {e}")
 
     if not post.is_video:
         raise RuntimeError("Post does not contain a video.")
 
-    loader.download_post(post, target=shortcode)
+    try:
+        loader.download_post(post, target=shortcode)
+    except Exception as e:
+        apply_download_cooldown(e)
+        raise RuntimeError(f"Video download failed: {e}")
 
     video_files = list(video_dir.glob("*.mp4"))
     if not video_files:
@@ -114,9 +251,10 @@ def download_post_video(url: str) -> tuple[Path, dict]:
 def transcribe_with_local_whisper(video_path: Path, model: str = "base") -> str:
     """Transcribe using local whisper CLI."""
     output_dir = video_path.parent
+    whisper_bin = os.environ.get("MYOS_WHISPER_BIN", "whisper")
     result = subprocess.run(
         [
-            "whisper",
+            whisper_bin,
             str(video_path),
             "--model", model,
             "--output_dir", str(output_dir),
@@ -199,6 +337,7 @@ def cmd_transcribe(args):
         video_path, metadata = download_post_video(args.url)
         transcript, model_used = transcribe_video(video_path, args.model)
         path = save_transcript(metadata, transcript, model_used)
+        mark_download_success("transcribe")
         write_status("idle", "success", f"Transcribed {metadata['shortcode']}")
         print(f"\n--- Transcript ({metadata['shortcode']}) ---")
         print(transcript)
@@ -211,31 +350,17 @@ def cmd_transcribe(args):
 
 def cmd_transcribe_profile(args):
     """Download and transcribe recent videos from a profile."""
-    import instaloader
-
     write_status("working", None, f"Sweeping profile @{args.username}")
     try:
-        loader = instaloader.Instaloader(
-            download_videos=True,
-            download_video_thumbnails=False,
-            download_geotags=False,
-            download_comments=False,
-            save_metadata=False,
-            compress_json=False,
-        )
-
-        ig_username = os.environ.get("IG_USERNAME")
-        ig_password = os.environ.get("IG_PASSWORD")
-        if ig_username and ig_password:
-            try:
-                loader.login(ig_username, ig_password)
-            except Exception as e:
-                print(f"Warning: Login failed ({e}), continuing anonymously", file=sys.stderr)
+        enforce_download_guard()
+        import instaloader
+        loader = build_loader()
 
         try:
             profile = instaloader.Profile.from_username(loader.context, args.username)
-        except instaloader.exceptions.LoginRequiredException:
-            raise RuntimeError("Profile is private. Login required.")
+        except Exception as e:
+            apply_download_cooldown(e)
+            raise RuntimeError(f"Could not load profile: {e}")
 
         count = 0
         for post in profile.get_posts():
@@ -261,6 +386,7 @@ def cmd_transcribe_profile(args):
             try:
                 loader.download_post(post, target=shortcode)
             except Exception as e:
+                apply_download_cooldown(e)
                 print(f"Failed to download {shortcode}: {e}", file=sys.stderr)
                 continue
 
@@ -280,6 +406,7 @@ def cmd_transcribe_profile(args):
             try:
                 transcript, model_used = transcribe_video(video_files[0], args.model)
                 save_transcript(metadata, transcript, model_used)
+                mark_download_success("transcribe_profile")
                 print(f"Transcribed: {shortcode}")
             except Exception as e:
                 print(f"Failed to transcribe {shortcode}: {e}", file=sys.stderr)
@@ -313,6 +440,7 @@ def cmd_transcribe_file(args):
             "downloadedAt": datetime.now(timezone.utc).isoformat(),
         }
         path = save_transcript(metadata, transcript, model_used)
+        mark_download_success("transcribe_file")
         write_status("idle", "success", f"Transcribed local file {video_path.name}")
         print(f"\n--- Transcript ({shortcode}) ---")
         print(transcript)

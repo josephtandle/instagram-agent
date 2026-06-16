@@ -1,0 +1,19 @@
+{
+  "id": "agent/instagram/official-stats",
+  "layer": "agent",
+  "owner": "instagram",
+  "title": "Read official Instagram account stats",
+  "tags": ["instagram", "stats", "analytics", "insights", "meta-graph", "read-only"],
+  "phrases": [
+    "instagram stats",
+    "instagram analytics",
+    "instagram views and comments",
+    "official instagram stats",
+    "instagram weekly performance"
+  ],
+  "inputMode": "structured",
+  "requiredContext": ["agent:instagram"],
+  "outputMode": "text",
+  "fallbackPolicy": "worker_optional",
+  "handler": "./official-stats.js"
+}
