@@ -14,8 +14,9 @@ def load_module(path: str, name: str):
     return module
 
 
-MAIN_PATH = "/Users/myos/.myos/workspace/agents/instagram/src/main.py"
-TRANSCRIBER_PATH = "/Users/myos/.myos/workspace/agents/instagram/transcriber/src/main.py"
+REPO_ROOT = Path(__file__).resolve().parents[1]
+MAIN_PATH = REPO_ROOT / "src" / "main.py"
+TRANSCRIBER_PATH = REPO_ROOT / "transcriber" / "src" / "main.py"
 
 
 class InstagramGuardrailTests(unittest.TestCase):

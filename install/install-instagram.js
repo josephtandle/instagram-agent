@@ -103,27 +103,35 @@ function isPython310Plus(command) {
 function findPython() {
   const attempts = process.platform === "win32"
     ? [
+        ["py", ["-3.12", "--version"]],
+        ["py", ["-3.11", "--version"]],
+        ["py", ["-3.10", "--version"]],
         ["py", ["-3", "--version"]],
         ["python", ["--version"]],
       ]
     : [
+        ["python3.12", ["--version"]],
+        ["python3.11", ["--version"]],
+        ["python3.10", ["--version"]],
         ["python3", ["--version"]],
         ["python", ["--version"]],
       ];
 
+  const oldVersions = [];
   for (const [command, args] of attempts) {
     const result = spawnSync(command, args, { encoding: "utf8" });
     if (result.status !== 0) continue;
     if (!isPython310Plus(command)) {
-      throw new Error(
-        `Python 3.10+ is required, but the detected ${command} is older.\n` +
-        "Install Python 3.10+ via pyenv, Homebrew (brew install python@3.11), or python.org.",
-      );
+      oldVersions.push(command);
+      continue;
     }
     return command;
   }
 
-  throw new Error("Could not find Python 3. Install Python 3.10+ and try again.");
+  const oldMessage = oldVersions.length
+    ? ` Detected older Python command(s): ${oldVersions.join(", ")}.`
+    : "";
+  throw new Error(`Could not find Python 3.10+.${oldMessage} Install Python 3.10+ and try again.`);
 }
 
 function createVenv(pythonCommand, installDir) {
