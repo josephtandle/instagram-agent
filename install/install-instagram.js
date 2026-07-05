@@ -36,8 +36,18 @@ function ensureDir(dirPath) {
 }
 
 const COPY_SKIP_NAMES = new Set([".git", "node_modules", ".venv", "__pycache__"]);
-const DATA_SKIP_NAMES = new Set(["sessions", "usage.json"]);
+const DATA_SKIP_NAMES = new Set(["sessions"]);
 const TRANSCRIBER_SKIP_NAMES = new Set(["data"]);
+
+function shouldSkipDataEntry(entryName) {
+  return (
+    DATA_SKIP_NAMES.has(entryName) ||
+    entryName.endsWith(".json") ||
+    entryName.endsWith(".sqlite") ||
+    entryName.endsWith(".db") ||
+    entryName.endsWith(".jsonl")
+  );
+}
 
 function copyRecursive(sourceDir, destDir, skipNames = COPY_SKIP_NAMES) {
   ensureDir(destDir);
@@ -52,7 +62,7 @@ function copyRecursive(sourceDir, destDir, skipNames = COPY_SKIP_NAMES) {
       const destData = path.join(destDir, entry.name);
       ensureDir(destData);
       for (const dataEntry of fs.readdirSync(sourceData, { withFileTypes: true })) {
-        if (DATA_SKIP_NAMES.has(dataEntry.name)) continue;
+        if (shouldSkipDataEntry(dataEntry.name)) continue;
         const src = path.join(sourceData, dataEntry.name);
         const dst = path.join(destData, dataEntry.name);
         if (dataEntry.isDirectory()) copyRecursive(src, dst);

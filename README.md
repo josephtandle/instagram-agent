@@ -145,6 +145,11 @@ Uses Meta Graph API only. This is the safe reporting path for daily/weekly views
 instagram official-stats
 ```
 
+Every `official-stats` run also persists a report-ready snapshot to:
+
+- `data/latest_official_stats.json` — full latest official stats payload
+- `data/health.json` — compact account summary for downstream reporting
+
 ### Post a Story
 
 ```bash

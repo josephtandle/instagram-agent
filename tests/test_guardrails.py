@@ -28,6 +28,7 @@ class InstagramGuardrailTests(unittest.TestCase):
 
         self.main.USAGE_PATH = self.base / "usage.json"
         self.main.HEALTH_PATH = self.base / "health.json"
+        self.main.LATEST_OFFICIAL_STATS_PATH = self.base / "latest_official_stats.json"
 
         self.transcriber.HEALTH_PATH = self.base / "transcriber-health.json"
         self.transcriber.SESSIONS_DIR = self.base / "sessions"
@@ -67,6 +68,19 @@ class InstagramGuardrailTests(unittest.TestCase):
         }
         self.transcriber.HEALTH_PATH.write_text(json.dumps(expired))
         self.assertIsNone(self.transcriber.get_active_download_cooldown())
+
+    def test_official_stats_unavailable_persists_snapshot(self):
+        args = type("Args", (), {"username": "joe"})()
+        with mock.patch.object(self.main, "META_IG_ACCESS_TOKEN", ""), mock.patch.object(self.main, "META_IG_ACCOUNT_ID", ""):
+            self.main.cmd_official_stats(args)
+
+        latest = json.loads(self.main.LATEST_OFFICIAL_STATS_PATH.read_text())
+        self.assertEqual(latest["status"], "unavailable")
+
+        health = json.loads(self.main.HEALTH_PATH.read_text())
+        account = health["accounts"]["joe"]
+        self.assertEqual(account["official_stats_status"], "unavailable")
+        self.assertEqual(account["official_stats_summary"]["followers"], 0)
 
 
 if __name__ == "__main__":

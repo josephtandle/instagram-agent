@@ -20,6 +20,7 @@ DATA_DIR = AGENT_DIR / "data"
 SESSIONS_DIR = DATA_DIR / "sessions"
 STATUS_PATH = AGENT_DIR / "status.json"
 HEALTH_PATH = DATA_DIR / "health.json"
+LATEST_OFFICIAL_STATS_PATH = DATA_DIR / "latest_official_stats.json"
 CONFIG_DIR = Path.home() / ".instagram-agent"
 DEVICE_PATH = CONFIG_DIR / "device.json"
 USAGE_PATH = DATA_DIR / "usage.json"
@@ -187,6 +188,54 @@ def _write_account_health(username: str, payload: dict) -> None:
     health = _load_health()
     health.setdefault("accounts", {})[username] = payload
     _save_health(health)
+
+
+def _summarize_official_stats(result: dict) -> dict:
+    windows = result.get("windows", {})
+    yesterday = windows.get("yesterday", {})
+    trailing_7d = windows.get("trailing_7d", {})
+    trailing_30d = windows.get("trailing_30d", {})
+    account = result.get("account", {})
+    return {
+        "followers": int(account.get("followers") or 0),
+        "media": int(account.get("media") or 0),
+        "yesterday": {
+            "views": int(yesterday.get("views") or 0),
+            "comments": int(yesterday.get("comments") or 0),
+            "likes": int(yesterday.get("likes") or 0),
+            "posts": int(yesterday.get("posts") or 0),
+        },
+        "trailing_7d": {
+            "views": int(trailing_7d.get("views") or 0),
+            "comments": int(trailing_7d.get("comments") or 0),
+            "likes": int(trailing_7d.get("likes") or 0),
+            "posts": int(trailing_7d.get("posts") or 0),
+        },
+        "trailing_30d": {
+            "views": int(trailing_30d.get("views") or 0),
+            "comments": int(trailing_30d.get("comments") or 0),
+            "likes": int(trailing_30d.get("likes") or 0),
+            "posts": int(trailing_30d.get("posts") or 0),
+        },
+    }
+
+
+def _persist_official_stats(username: str, result: dict) -> None:
+    payload = _account_health(username)
+    payload["last_official_stats_at"] = _utc_now().isoformat()
+    payload["last_official_stats_source"] = result.get("source", "meta_graph_api")
+    payload["official_stats_status"] = result.get("status", "unknown")
+    payload["official_stats_account"] = result.get("account", {})
+    payload["official_stats_windows"] = result.get("windows", {})
+    payload["official_stats_media_fetched"] = int(result.get("mediaFetched") or 0)
+    payload["official_stats_summary"] = _summarize_official_stats(result)
+    if result.get("error"):
+        payload["official_stats_error"] = result.get("error")
+    else:
+        payload.pop("official_stats_error", None)
+    payload["updated_at"] = _utc_now().isoformat()
+    _write_account_health(username, payload)
+    LATEST_OFFICIAL_STATS_PATH.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n")
 
 
 def set_account_cooldown(username: str, seconds: int, reason: str, source: str, trigger: str) -> dict:
@@ -511,7 +560,7 @@ def _summarize_media(media: list[dict], windows: dict) -> dict:
 def cmd_official_stats(args):
     """Read Instagram account stats via the official Meta Graph API only."""
     if not META_IG_ACCESS_TOKEN or not META_IG_ACCOUNT_ID:
-        print(json.dumps({
+        result = {
             "status": "unavailable",
             "source": "meta_graph_api",
             "readOnly": True,
@@ -520,7 +569,10 @@ def cmd_official_stats(args):
                 "META_IG_ACCOUNT_ID": bool(META_IG_ACCOUNT_ID),
             },
             "error": "META_IG_ACCESS_TOKEN and META_IG_ACCOUNT_ID are required for official read-only Instagram stats.",
-        }, indent=2))
+        }
+        _persist_official_stats(args.username, result)
+        write_status("idle", "partial", "Official Instagram stats unavailable")
+        print(json.dumps(result, indent=2))
         return
 
     try:
@@ -588,16 +640,20 @@ def cmd_official_stats(args):
                 for item in media[:25]
             ] if args.include_media else [],
         }
+        _persist_official_stats(args.username, result)
+        mark_account_success(args.username, "official_stats")
         print(json.dumps(result, ensure_ascii=False, indent=2))
         write_status("idle", "success", "Official Instagram stats fetched")
     except Exception as e:
-        write_status("idle", "error", str(e))
-        print(json.dumps({
+        result = {
             "status": "error",
             "source": "meta_graph_api",
             "readOnly": True,
             "error": str(e),
-        }, ensure_ascii=False, indent=2))
+        }
+        _persist_official_stats(args.username, result)
+        write_status("idle", "error", str(e))
+        print(json.dumps(result, ensure_ascii=False, indent=2))
         sys.exit(1)
 
 
