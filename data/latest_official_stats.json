@@ -1,0 +1,10 @@
+{
+  "status": "unavailable",
+  "source": "meta_graph_api",
+  "readOnly": true,
+  "configured": {
+    "META_IG_ACCESS_TOKEN": false,
+    "META_IG_ACCOUNT_ID": true
+  },
+  "error": "META_IG_ACCESS_TOKEN and META_IG_ACCOUNT_ID are required for official read-only Instagram stats."
+}

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from __future__ import annotations
 """IGVideoTranscriber -- Download Instagram videos and transcribe with Whisper."""
 
 import argparse

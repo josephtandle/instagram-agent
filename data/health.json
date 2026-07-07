@@ -3,7 +3,36 @@
     "joe.che.official": {
       "last_success_at": "2026-06-03T17:32:36.867773+00:00",
       "last_success_source": "get_profile",
-      "updated_at": "2026-06-03T17:32:36.867776+00:00"
+      "updated_at": "2026-07-06T23:30:01.793082+00:00",
+      "last_official_stats_at": "2026-07-06T23:30:01.792751+00:00",
+      "last_official_stats_source": "meta_graph_api",
+      "official_stats_status": "unavailable",
+      "official_stats_account": {},
+      "official_stats_windows": {},
+      "official_stats_media_fetched": 0,
+      "official_stats_summary": {
+        "followers": 0,
+        "media": 0,
+        "yesterday": {
+          "views": 0,
+          "comments": 0,
+          "likes": 0,
+          "posts": 0
+        },
+        "trailing_7d": {
+          "views": 0,
+          "comments": 0,
+          "likes": 0,
+          "posts": 0
+        },
+        "trailing_30d": {
+          "views": 0,
+          "comments": 0,
+          "likes": 0,
+          "posts": 0
+        }
+      },
+      "official_stats_error": "META_IG_ACCESS_TOKEN and META_IG_ACCOUNT_ID are required for official read-only Instagram stats."
     }
   }
 }
