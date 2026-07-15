@@ -969,7 +969,11 @@ def cmd_read_dms(args):
             human_pause("glance")  # navigating to the search
             user_id = cl.user_id_from_username(handle)
             human_pause("read")  # opening the thread
-            thread = cl.direct_thread_by_participants([user_id])
+            # direct_thread_by_participants returns a raw dict (thread_id lookup only);
+            # direct_thread() returns the typed DirectThread object with parsed .messages.
+            thread_lookup = cl.direct_thread_by_participants([user_id])
+            thread_id = thread_lookup.get("thread_id") or thread_lookup.get("thread", {}).get("thread_id")
+            thread = cl.direct_thread(thread_id, amount=args.limit)
             messages = []
             for m in thread.messages[:args.limit]:
                 messages.append({

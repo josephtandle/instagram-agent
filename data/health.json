@@ -1,10 +1,10 @@
 {
   "accounts": {
     "joe.che.official": {
-      "last_success_at": "2026-06-03T17:32:36.867773+00:00",
+      "last_success_at": "2026-07-13T04:38:44.014774+00:00",
       "last_success_source": "get_profile",
-      "updated_at": "2026-07-06T23:30:01.793082+00:00",
-      "last_official_stats_at": "2026-07-06T23:30:01.792751+00:00",
+      "updated_at": "2026-07-14T23:30:01.399361+00:00",
+      "last_official_stats_at": "2026-07-14T23:30:01.398818+00:00",
       "last_official_stats_source": "meta_graph_api",
       "official_stats_status": "unavailable",
       "official_stats_account": {},
