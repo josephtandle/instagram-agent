@@ -48,14 +48,21 @@ def load_environment():
     candidates.extend([
         AGENT_DIR / ".env",
         Path.home() / ".instagram-agent" / ".env",
+        # Workspace .env holds META_IG_ACCESS_TOKEN / META_IG_ACCOUNT_ID, which the
+        # agent-local files do not. Load it too rather than duplicating secrets.
+        Path.home() / ".myos" / "workspace" / ".env",
     ])
 
+    # Load every candidate that exists, in order. load_dotenv does not override
+    # already-set vars, so earlier files keep precedence and later ones only fill gaps.
+    first_loaded = None
     for env_path in candidates:
         if env_path.exists():
             load_dotenv(env_path)
-            return env_path
+            if first_loaded is None:
+                first_loaded = env_path
 
-    return None
+    return first_loaded
 
 
 ENV_PATH = load_environment()
