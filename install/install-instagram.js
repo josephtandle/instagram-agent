@@ -36,8 +36,18 @@ function ensureDir(dirPath) {
 }
 
 const COPY_SKIP_NAMES = new Set([".git", "node_modules", ".venv", "__pycache__"]);
-const DATA_SKIP_NAMES = new Set(["sessions", "usage.json"]);
+const DATA_SKIP_NAMES = new Set(["sessions"]);
 const TRANSCRIBER_SKIP_NAMES = new Set(["data"]);
+
+function shouldSkipDataEntry(entryName) {
+  return (
+    DATA_SKIP_NAMES.has(entryName) ||
+    entryName.endsWith(".json") ||
+    entryName.endsWith(".sqlite") ||
+    entryName.endsWith(".db") ||
+    entryName.endsWith(".jsonl")
+  );
+}
 
 function copyRecursive(sourceDir, destDir, skipNames = COPY_SKIP_NAMES) {
   ensureDir(destDir);
@@ -52,7 +62,7 @@ function copyRecursive(sourceDir, destDir, skipNames = COPY_SKIP_NAMES) {
       const destData = path.join(destDir, entry.name);
       ensureDir(destData);
       for (const dataEntry of fs.readdirSync(sourceData, { withFileTypes: true })) {
-        if (DATA_SKIP_NAMES.has(dataEntry.name)) continue;
+        if (shouldSkipDataEntry(dataEntry.name)) continue;
         const src = path.join(sourceData, dataEntry.name);
         const dst = path.join(destData, dataEntry.name);
         if (dataEntry.isDirectory()) copyRecursive(src, dst);
@@ -103,27 +113,35 @@ function isPython310Plus(command) {
 function findPython() {
   const attempts = process.platform === "win32"
     ? [
+        ["py", ["-3.12", "--version"]],
+        ["py", ["-3.11", "--version"]],
+        ["py", ["-3.10", "--version"]],
         ["py", ["-3", "--version"]],
         ["python", ["--version"]],
       ]
     : [
+        ["python3.12", ["--version"]],
+        ["python3.11", ["--version"]],
+        ["python3.10", ["--version"]],
         ["python3", ["--version"]],
         ["python", ["--version"]],
       ];
 
+  const oldVersions = [];
   for (const [command, args] of attempts) {
     const result = spawnSync(command, args, { encoding: "utf8" });
     if (result.status !== 0) continue;
     if (!isPython310Plus(command)) {
-      throw new Error(
-        `Python 3.10+ is required, but the detected ${command} is older.\n` +
-        "Install Python 3.10+ via pyenv, Homebrew (brew install python@3.11), or python.org.",
-      );
+      oldVersions.push(command);
+      continue;
     }
     return command;
   }
 
-  throw new Error("Could not find Python 3. Install Python 3.10+ and try again.");
+  const oldMessage = oldVersions.length
+    ? ` Detected older Python command(s): ${oldVersions.join(", ")}.`
+    : "";
+  throw new Error(`Could not find Python 3.10+.${oldMessage} Install Python 3.10+ and try again.`);
 }
 
 function createVenv(pythonCommand, installDir) {

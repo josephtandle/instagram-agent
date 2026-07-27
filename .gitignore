@@ -5,6 +5,9 @@ __pycache__/
 .venv/
 node_modules/
 data/sessions/
+data/*.json
+data/*.sqlite
+!data/.gitkeep
 transcriber/data/
 transcriber/status.json
 status.json
