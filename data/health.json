@@ -1,10 +1,10 @@
 {
   "accounts": {
     "joe.che.official": {
-      "last_success_at": "2026-07-23T04:16:17.203117+00:00",
-      "last_success_source": "session_reuse",
-      "updated_at": "2026-07-23T04:16:17.203148+00:00",
-      "last_official_stats_at": "2026-07-22T23:30:01.473345+00:00",
+      "last_success_at": "2026-07-24T07:43:57.784548+00:00",
+      "last_success_source": "get_profile",
+      "updated_at": "2026-07-26T23:30:01.987117+00:00",
+      "last_official_stats_at": "2026-07-26T23:30:01.986595+00:00",
       "last_official_stats_source": "meta_graph_api",
       "official_stats_status": "unavailable",
       "official_stats_account": {},
