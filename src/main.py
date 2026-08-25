@@ -927,11 +927,23 @@ def cmd_get_profile(args):
 
         posts = []
         for m in medias:
+            # Image URLs matter: many accounts publish their real content (schedules, lineups,
+            # flyers) as an IMAGE with a throwaway caption. Captions alone lose the payload.
+            thumb = getattr(m, "thumbnail_url", None)
+            carousel = []
+            for r in (getattr(m, "resources", None) or []):
+                u = getattr(r, "thumbnail_url", None)
+                if u:
+                    carousel.append(str(u))
             posts.append({
                 "caption": m.caption_text or "",
                 "taken_at": m.taken_at.isoformat() if m.taken_at else "",
                 "media_type": str(m.media_type),
                 "like_count": m.like_count or 0,
+                "code": getattr(m, "code", "") or "",
+                "permalink": f"https://instagram.com/p/{getattr(m, 'code', '')}/" if getattr(m, "code", None) else "",
+                "image_url": str(thumb) if thumb else "",
+                "carousel_image_urls": carousel,
             })
 
         result = {
