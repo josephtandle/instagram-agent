@@ -907,16 +907,35 @@ def cmd_get_profile(args):
         enforce_action_guard(args.username, "profile_reads")
         cl = get_client(args.username)
 
-        # Call 1: resolve user ID
+        # Resolve the profile. user_id_from_username() hits the PUBLIC web endpoint, which
+        # Instagram rate-limits hard (400 Bad Request) even when we hold a valid session.
+        # Prefer the authenticated v1 path and only fall back to the public one.
+        user = None
         try:
-            user_id = cl.user_id_from_username(handle)
-        except Exception as e:
-            print(json.dumps({"error": f"User not found: {handle} — {e}"}))
-            sys.exit(1)
+            user = cl.user_info_by_username_v1(handle)   # authenticated
+        except Exception:
+            try:
+                human_pause("think")
+                user_id = cl.user_id_from_username(handle)   # public fallback
+                user = cl.user_info(user_id)
+            except Exception as e:
+                msg = str(e)
+                if "web_profile_info" in msg and "400" in msg:
+                    hint = ("PUBLIC endpoint rate-limited. The private API also refused "
+                            "(login_required) — the saved session authenticates for login but not "
+                            "for private reads, which usually means a pending checkpoint. Open the "
+                            "Instagram app, clear any 'Was this you?' prompt, then run `login`. "
+                            "Meanwhile: slow down (>60s between profiles) and the public endpoint recovers.")
+                elif "login_required" in msg:
+                    hint = ("Session is not valid for private reads. Clear any checkpoint in the "
+                            "Instagram app, then run `login`.")
+                else:
+                    hint = ""
+                print(json.dumps({"error": f"Lookup failed for {handle} — {msg}", "hint": hint}))
+                sys.exit(1)
+        user_id = user.pk
 
-        # Call 2: get profile info
         human_pause("think")  # landing on a profile page and reading it
-        user = cl.user_info(user_id)
 
         # Call 3: get recent posts captions
         human_pause("scroll")  # scrolling down through the grid
@@ -927,11 +946,23 @@ def cmd_get_profile(args):
 
         posts = []
         for m in medias:
+            # Image URLs matter: many accounts publish their real content (schedules, lineups,
+            # flyers) as an IMAGE with a throwaway caption. Captions alone lose the payload.
+            thumb = getattr(m, "thumbnail_url", None)
+            carousel = []
+            for r in (getattr(m, "resources", None) or []):
+                u = getattr(r, "thumbnail_url", None)
+                if u:
+                    carousel.append(str(u))
             posts.append({
                 "caption": m.caption_text or "",
                 "taken_at": m.taken_at.isoformat() if m.taken_at else "",
                 "media_type": str(m.media_type),
                 "like_count": m.like_count or 0,
+                "code": getattr(m, "code", "") or "",
+                "permalink": f"https://instagram.com/p/{getattr(m, 'code', '')}/" if getattr(m, "code", None) else "",
+                "image_url": str(thumb) if thumb else "",
+                "carousel_image_urls": carousel,
             })
 
         result = {
