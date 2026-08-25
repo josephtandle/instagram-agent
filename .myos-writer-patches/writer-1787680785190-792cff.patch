@@ -1,0 +1,300 @@
+diff --git a/src/main.py b/src/main.py
+index 80ebf0e..27b92c0 100644
+--- a/src/main.py
++++ b/src/main.py
+@@ -77,24 +77,23 @@ GRAPH_API_BASE = "https://graph.facebook.com/v19.0"
+ 
+ 
+ # ── Human timing ──────────────────────────────────────────────────
+-# Named delay profiles that mimic realistic human interaction pacing.
+-# Err on the side of longer — safety matters more than speed.
+-
+-_PAUSE_RANGES = {
+-    "glance":  (1.5,  4.0),   # brief moment before a quick action
+-    "read":    (3.0,  8.0),   # reading a message or scanning a thread
+-    "scroll":  (5.0, 14.0),   # browsing through a list (inbox, comments)
+-    "think":   (6.0, 16.0),   # pausing before looking at a profile
+-    "compose": (4.0, 10.0),   # opening a compose window
+-    "post":    (10.0, 28.0),  # reviewing content before hitting Post
+-}
++# Human interaction pacing.
++# Sleep like a person looking at a phone, not a script.
+ 
+ 
+-def human_pause(kind: str = "glance") -> None:
+-    lo, hi = _PAUSE_RANGES.get(kind, _PAUSE_RANGES["glance"])
+-    duration = random.uniform(lo, hi)
+-    print(f"  [human pause: {duration:.1f}s]", file=sys.stderr, flush=True)
+-    time.sleep(duration)
++def human_pause(short: bool | str = False) -> None:
++    """Sleep like a person looking at a phone, not a script."""
++    import random
++    import time
++
++    is_short = short if isinstance(short, bool) else (str(short).lower() in ("glance", "short", "true"))
++    if is_short:
++        time.sleep(random.uniform(1.5, 4.0))
++        return
++    d = random.uniform(18, 55)
++    if random.random() < 0.12:  # occasionally they put the phone down
++        d += random.uniform(45, 150)
++    time.sleep(d)
+ 
+ 
+ def typing_delay(text: str) -> None:
+@@ -352,6 +351,24 @@ def apply_protective_cooldown(username: str, source: str, exc: Exception) -> dic
+     return set_account_cooldown(username, seconds, reason, source, trigger)
+ 
+ 
++def check_backoff(exc: Exception, username: str | None = None, source: str = "safety_brake") -> None:
++    """Hard safety brake: if exc is a rate-limit/challenge exception, apply protective cooldown, print message, and exit."""
++    from instagrapi.exceptions import (
++        ChallengeRequired,
++        FeedbackRequired,
++        PleaseWaitFewMinutes,
++        RateLimitError,
++    )
++
++    if isinstance(exc, (FeedbackRequired, RateLimitError, PleaseWaitFewMinutes, ChallengeRequired)):
++        uname = username or IG_USERNAME
++        apply_protective_cooldown(uname, source, exc)
++        msg = f"Safety brake triggered ({exc.__class__.__name__}): {exc}. Cooldown applied."
++        print(f"Error: {msg}", file=sys.stderr)
++        write_status("idle", "error", msg)
++        sys.exit(1)
++
++
+ def mark_account_success(username: str, source: str) -> None:
+     payload = _account_health(username)
+     payload["last_success_at"] = _utc_now().isoformat()
+@@ -361,7 +378,7 @@ def mark_account_success(username: str, source: str) -> None:
+ 
+ 
+ def get_client(username: str = IG_USERNAME):
+-    """Return an authenticated instagrapi Client, using saved session if available."""
++    """Return an authenticated instagrapi Client, using saved session or browser cookies before password fallback."""
+     if not username:
+         print(
+             "Error: IG_USERNAME is not set. Add it to ~/.instagram-agent/.env",
+@@ -370,39 +387,50 @@ def get_client(username: str = IG_USERNAME):
+         sys.exit(1)
+ 
+     from instagrapi import Client
+-    from instagrapi.exceptions import (
+-        BadPassword,
+-        ChallengeRequired,
+-        FeedbackRequired,
+-        LoginRequired,
+-        RateLimitError,
+-    )
++    from instagrapi.exceptions import BadPassword
+ 
+     device = get_or_create_device()
+     cl = Client()
+     cl.set_device(device["device_settings"])
+     cl.set_user_agent(device["user_agent"])
+-    cl.delay_range = [2, 5]
++    cl.delay_range = [4, 11]
+     cl.request_timeout = 30
+ 
+     session_path = SESSIONS_DIR / f"{username}.json"
++
++    # Step 1: saved session at data/sessions/<username>.json
+     if session_path.exists():
+         try:
+             cl.load_settings(session_path)
+-            cl.account_info()  # cheap verify — avoids a full re-login roundtrip
++            cl.account_info()  # cheap verify - avoids a full re-login roundtrip
+             cl.dump_settings(session_path)
+             mark_account_success(username, "session_reuse")
+             return cl
+-        except ChallengeRequired:
+-            apply_protective_cooldown(username, "session_reuse", ChallengeRequired("challenge required"))
+-            print(
+-                "Error: Instagram requires verification. Open the Instagram app, complete "
+-                "any security prompts, then run `instagram login` to restore the session.",
+-                file=sys.stderr,
+-            )
+-            sys.exit(1)
+-        except (LoginRequired, Exception):
+-            pass  # session stale — fall through to password login
++        except Exception as e:
++            check_backoff(e, username, "session_reuse")
++            pass  # session stale - fall through to browser cookies or password login
++
++    # Step 2: browser cookies from ~/.instagram-agent/browser-cookies.json
++    browser_cookies_path = CONFIG_DIR / "browser-cookies.json"
++    if browser_cookies_path.exists():
++        try:
++            cookies_data = json.loads(browser_cookies_path.read_text())
++            if isinstance(cookies_data, dict):
++                sessionid = cookies_data.get("sessionid")
++                if sessionid and isinstance(sessionid, str):
++                    cl.login_by_sessionid(sessionid)
++                    cl.dump_settings(session_path)
++                    mark_account_success(username, "browser_session")
++                    return cl
++        except Exception:
++            pass  # skip step 2 silently and fall through to step 3
++
++    # Step 3: password login as LAST resort
++    print(
++        "Warning: Password login can trigger an Instagram checkpoint or challenge. "
++        "The preferred fix is to log in inside the agent browser and re-export cookies.",
++        file=sys.stderr,
++    )
+ 
+     password = os.environ.get("IG_PASSWORD")
+     if not password:
+@@ -411,24 +439,13 @@ def get_client(username: str = IG_USERNAME):
+ 
+     try:
+         cl.login(username, password)
+-    except ChallengeRequired:
+-        apply_protective_cooldown(username, "login", ChallengeRequired("challenge required"))
+-        print(
+-            "Error: Instagram requires verification at login. Open the Instagram app, complete "
+-            "any security prompts, then try again.",
+-            file=sys.stderr,
+-        )
+-        sys.exit(1)
+     except BadPassword:
+         print("Error: Instagram password is incorrect. Update IG_PASSWORD in your .env file.", file=sys.stderr)
+         sys.exit(1)
+-    except FeedbackRequired as e:
++    except Exception as e:
++        check_backoff(e, username, "login")
+         apply_protective_cooldown(username, "login", e)
+-        print(f"Error: Instagram blocked this action. Try again later. Detail: {e}", file=sys.stderr)
+-        sys.exit(1)
+-    except RateLimitError:
+-        apply_protective_cooldown(username, "login", RateLimitError("rate limit"))
+-        print("Error: Instagram rate limit hit. Wait a few minutes before trying again.", file=sys.stderr)
++        print(f"Error: {e}", file=sys.stderr)
+         sys.exit(1)
+ 
+     cl.dump_settings(session_path)
+@@ -680,7 +697,7 @@ def cmd_login(args):
+     cl = Client()
+     cl.set_device(device["device_settings"])
+     cl.set_user_agent(device["user_agent"])
+-    cl.delay_range = [2, 5]
++    cl.delay_range = [4, 11]
+ 
+     session_path = SESSIONS_DIR / f"{args.username}.json"
+     print(f"Logging in as @{args.username}...")
+@@ -703,6 +720,7 @@ def cmd_login(args):
+             two_factor_identifier=identifier,
+         )
+     except Exception as e:
++        check_backoff(e, args.username, "login")
+         apply_protective_cooldown(args.username, "login", e)
+         write_status("idle", "error", str(e))
+         print(f"Error: {e}", file=sys.stderr)
+@@ -776,6 +794,7 @@ def cmd_post_story(args):
+             print(f"Tagged: {', '.join('@' + m['username'] for m in mentions)}")
+ 
+     except Exception as e:
++        check_backoff(e, args.username, "post_story")
+         apply_protective_cooldown(args.username, "post_story", e)
+         write_status("idle", "error", str(e))
+         print(f"Error: {e}", file=sys.stderr)
+@@ -811,6 +830,7 @@ def cmd_post_feed(args):
+         print(f"Media ID: {media.pk}")
+ 
+     except Exception as e:
++        check_backoff(e, args.username, "post_feed")
+         apply_protective_cooldown(args.username, "post_feed", e)
+         write_status("idle", "error", str(e))
+         print(f"Error: {e}", file=sys.stderr)
+@@ -839,6 +859,7 @@ def cmd_post_reel(args):
+         print(f"Media ID: {media.pk}")
+ 
+     except Exception as e:
++        check_backoff(e, args.username, "post_reel")
+         apply_protective_cooldown(args.username, "post_reel", e)
+         write_status("idle", "error", str(e))
+         print(f"Error: {e}", file=sys.stderr)
+@@ -870,6 +891,7 @@ def cmd_post_carousel(args):
+         print(f"\nCarousel posted!")
+         print(f"Media ID: {media.pk}")
+     except Exception as e:
++        check_backoff(e, args.username, "post_carousel")
+         apply_protective_cooldown(args.username, "post_carousel", e)
+         write_status("idle", "error", str(e))
+         print(f"Error: {e}", file=sys.stderr)
+@@ -893,6 +915,7 @@ def cmd_resolve_user(args):
+         record_action(args.username, "user_resolves", amount=max(1, len(args.handles)))
+         mark_account_success(args.username, "resolve_user")
+     except Exception as e:
++        check_backoff(e, args.username, "resolve_user")
+         apply_protective_cooldown(args.username, "resolve_user", e)
+         print(f"Error: {e}", file=sys.stderr)
+         sys.exit(1)
+@@ -922,7 +945,7 @@ def cmd_get_profile(args):
+                 msg = str(e)
+                 if "web_profile_info" in msg and "400" in msg:
+                     hint = ("PUBLIC endpoint rate-limited. The private API also refused "
+-                            "(login_required) — the saved session authenticates for login but not "
++                            "(login_required) - the saved session authenticates for login but not "
+                             "for private reads, which usually means a pending checkpoint. Open the "
+                             "Instagram app, clear any 'Was this you?' prompt, then run `login`. "
+                             "Meanwhile: slow down (>60s between profiles) and the public endpoint recovers.")
+@@ -931,7 +954,7 @@ def cmd_get_profile(args):
+                             "Instagram app, then run `login`.")
+                 else:
+                     hint = ""
+-                print(json.dumps({"error": f"Lookup failed for {handle} — {msg}", "hint": hint}))
++                print(json.dumps({"error": f"Lookup failed for {handle} - {msg}", "hint": hint}))
+                 sys.exit(1)
+         user_id = user.pk
+ 
+@@ -990,6 +1013,7 @@ def cmd_get_profile(args):
+         mark_account_success(args.username, "get_profile")
+ 
+     except Exception as e:
++        check_backoff(e, args.username, "get_profile")
+         apply_protective_cooldown(args.username, "get_profile", e)
+         write_status("idle", "error", str(e))
+         print(json.dumps({"error": str(e)}))
+@@ -1042,6 +1066,7 @@ def cmd_read_dms(args):
+         mark_account_success(args.username, "read_dms")
+ 
+     except Exception as e:
++        check_backoff(e, args.username, "read_dms")
+         apply_protective_cooldown(args.username, "read_dms", e)
+         write_status("idle", "error", str(e))
+         print(json.dumps({"error": str(e)}))
+@@ -1069,6 +1094,7 @@ def cmd_send_dm(args):
+             "text": args.text,
+         }, ensure_ascii=False, indent=2))
+     except Exception as e:
++        check_backoff(e, args.username, "send_dm")
+         apply_protective_cooldown(args.username, "send_dm", e)
+         write_status("idle", "error", str(e))
+         print(json.dumps({"error": str(e)}))
+@@ -1111,6 +1137,7 @@ def cmd_read_comments(args):
+         mark_account_success(args.username, "read_comments")
+ 
+     except Exception as e:
++        check_backoff(e, args.username, "read_comments")
+         apply_protective_cooldown(args.username, "read_comments", e)
+         write_status("idle", "error", str(e))
+         print(json.dumps({"error": str(e)}))
+@@ -1139,6 +1166,7 @@ def cmd_reply_comment(args):
+             "text": getattr(comment, "text", args.text) or args.text,
+         }, ensure_ascii=False, indent=2))
+     except Exception as e:
++        check_backoff(e, args.username, "reply_comment")
+         apply_protective_cooldown(args.username, "reply_comment", e)
+         write_status("idle", "error", str(e))
+         print(json.dumps({"error": str(e)}))
+@@ -1167,7 +1195,7 @@ def cmd_status(args):
+ # ── Main ──────────────────────────────────────────────────────────
+ 
+ def main():
+-    parser = argparse.ArgumentParser(description="Instagram Agent — post, story, reel, tag")
++    parser = argparse.ArgumentParser(description="Instagram Agent - post, story, reel, tag")
+     parser.add_argument("--username", default=IG_USERNAME, help="Instagram account (overrides IG_USERNAME env var)")
+     subparsers = parser.add_subparsers(dest="command", required=True)
+ 
