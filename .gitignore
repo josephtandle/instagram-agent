@@ -11,3 +11,4 @@ data/*.sqlite
 transcriber/data/
 transcriber/status.json
 status.json
+.myos-writer-patches/
