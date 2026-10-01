@@ -962,10 +962,12 @@ def cmd_get_profile(args):
 
         # Call 3: get recent posts captions
         human_pause("scroll")  # scrolling down through the grid
+        posts_error = ""
         try:
             medias = cl.user_medias(user_id, amount=max_posts)
-        except Exception:
+        except Exception as e:
             medias = []
+            posts_error = f"{type(e).__name__}: {str(e)[:200]}"
 
         posts = []
         for m in medias:
@@ -1004,6 +1006,8 @@ def cmd_get_profile(args):
             ),
             "profile_url": f"https://instagram.com/{handle}",
             "posts_fetched": len(posts),
+            "is_private": bool(getattr(user, "is_private", False)),
+            "posts_error": posts_error,
             "posts": posts,
         }
 
