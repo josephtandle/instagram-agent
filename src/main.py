@@ -377,6 +377,26 @@ def mark_account_success(username: str, source: str) -> None:
     _write_account_health(username, payload)
 
 
+def _guard_post_publish_expose(cl) -> None:
+    """Keep a dead telemetry endpoint from failing a post that already went live.
+
+    instagrapi calls cl.expose() (POST qe/expose/) AFTER a story/video is configured.
+    Instagram now 404s that endpoint, so the upload raised even though the story was
+    live, and a retry double-posted (2026-10-07, Connection Dinner story). expose()
+    is experiment telemetry only, so a failure there is logged and swallowed.
+    """
+    original = cl.expose
+
+    def safe_expose(*args, **kwargs):
+        try:
+            return original(*args, **kwargs)
+        except Exception as e:
+            print(f"Warning: qe/expose failed after publish (ignored): {e}", file=sys.stderr)
+            return None
+
+    cl.expose = safe_expose
+
+
 def get_client(username: str = IG_USERNAME):
     """Return an authenticated instagrapi Client, using saved session or browser cookies before password fallback."""
     if not username:
@@ -395,6 +415,7 @@ def get_client(username: str = IG_USERNAME):
     cl.set_user_agent(device["user_agent"])
     cl.delay_range = [4, 11]
     cl.request_timeout = 30
+    _guard_post_publish_expose(cl)
 
     session_path = SESSIONS_DIR / f"{username}.json"
 
