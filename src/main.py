@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import random
+import subprocess
 import sys
 import time
 from datetime import datetime, timedelta, timezone
@@ -1098,9 +1099,36 @@ def cmd_read_dms(args):
         sys.exit(1)
 
 
+CLOSE_CIRCLE_GUARD = os.environ.get("MYOS_CLOSE_CIRCLE_GUARD") or os.path.join(
+    os.environ.get("MYOS_WORKSPACE", "/Users/myos/.myos/workspace"), "agents", "shared", "close-circle-guard.js")
+
+
+def close_circle_check(handle, name=None):
+    """Joe's HARD RULE (2026-10-07): never DM his friends / close circle to sell.
+
+    Asks the shared guard (agents/shared/close-circle-guard.js). Fails CLOSED:
+    if the guard cannot run, the answer is "blocked". Returns (blocked, reason).
+    """
+    cmd = ["node", CLOSE_CIRCLE_GUARD, "check", "--ig", handle, "--json", "--log",
+           "--caller", "agents/instagram/src/main.py send-dm"]
+    if name:
+        cmd += ["--name", name]
+    try:
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        verdict = json.loads(out.stdout.strip().splitlines()[-1])
+        return bool(verdict.get("blocked", True)), verdict.get("reason") or "close-circle guard"
+    except Exception as e:  # noqa: BLE001 - any failure must block, never send
+        return True, f"fail closed: close-circle guard could not run ({e})"
+
+
 def cmd_send_dm(args):
     """Send a DM to an Instagram user."""
     handle = args.handle.lstrip("@")
+    blocked, reason = close_circle_check(handle, getattr(args, "name", None))
+    if blocked:
+        print(json.dumps({"sent": False, "blocked": True, "handle": handle,
+                          "error": f"NOT SENT, close-circle guard: {reason}"}))
+        sys.exit(3)
     try:
         cl = get_client(args.username)
         enforce_action_guard(args.username, "sent_dms")
@@ -1276,6 +1304,7 @@ def main():
     p_send_dm = subparsers.add_parser("send-dm", help="Send a DM to a user")
     p_send_dm.add_argument("handle", metavar="@HANDLE", help="Recipient Instagram handle")
     p_send_dm.add_argument("--text", required=True, help="Message text to send")
+    p_send_dm.add_argument("--name", default=None, help="Recipient full name (sharpens the close-circle check)")
     p_send_dm.set_defaults(func=cmd_send_dm)
 
     # read-comments
