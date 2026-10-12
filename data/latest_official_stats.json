@@ -1,10 +1,56 @@
 {
-  "status": "unavailable",
-  "source": "meta_graph_api",
+  "status": "ok",
+  "source": "composio",
   "readOnly": true,
-  "configured": {
-    "META_IG_ACCESS_TOKEN": false,
-    "META_IG_ACCOUNT_ID": true
+  "generatedAt": "2026-10-12T00:49:28.335275+00:00",
+  "account": {
+    "id": "17841401753535811",
+    "username": "joe.che.official",
+    "followers": 20511,
+    "media": 626
   },
-  "error": "META_IG_ACCESS_TOKEN and META_IG_ACCOUNT_ID are required for official read-only Instagram stats."
+  "windows": {
+    "yesterday": {
+      "label": "yesterday",
+      "start": "2026-10-11T00:00:00+08:00",
+      "end": "2026-10-12T00:00:00+08:00",
+      "posts": 0,
+      "views": 0,
+      "comments": 0,
+      "likes": 0,
+      "hasViewData": false
+    },
+    "completedWeek": {
+      "label": "last completed Monday-to-Monday week",
+      "start": "2026-10-05T00:00:00+08:00",
+      "end": "2026-10-12T00:00:00+08:00",
+      "posts": 7,
+      "views": 3426,
+      "comments": 50,
+      "likes": 94,
+      "hasViewData": true
+    },
+    "previousWeek": {
+      "label": "previous Monday-to-Monday week",
+      "start": "2026-09-28T00:00:00+08:00",
+      "end": "2026-10-05T00:00:00+08:00",
+      "posts": 4,
+      "views": 2175,
+      "comments": 15,
+      "likes": 66,
+      "hasViewData": true
+    },
+    "monthToDate": {
+      "label": "month to date",
+      "start": "2026-10-01T00:00:00+08:00",
+      "end": "2026-10-12T08:49:22.371092+08:00",
+      "posts": 9,
+      "views": 4394,
+      "comments": 56,
+      "likes": 119,
+      "hasViewData": true
+    }
+  },
+  "mediaFetched": 11,
+  "media": []
 }

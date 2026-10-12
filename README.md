@@ -139,11 +139,27 @@ instagram get-profile @someuser --posts 12
 
 ### Read official stats
 
-Uses Meta Graph API only. This is the safe reporting path for daily/weekly views and comments.
+Reads official account and media stats through Meta Graph API or Composio Connect.
+By default (`--source auto`), Graph is tried first when both `META_IG_ACCESS_TOKEN`
+and `META_IG_ACCOUNT_ID` are configured. If either is missing, or Graph fails for
+any reason (auth, permissions, rate limit, network), the command falls back to
+Composio when `COMPOSIO_API_KEY` is set.
+
+For Composio, set `COMPOSIO_API_KEY` to a Connect consumer API key (`ck_` prefix)
+and connect an Instagram account. Optionally set `COMPOSIO_INSTAGRAM_ACCOUNT` to
+select a connected account; leaving it empty uses the default connection.
 
 ```bash
 instagram official-stats
+instagram official-stats --source graph
+instagram official-stats --source composio --include-media
 ```
+
+`--source graph` and `--source composio` use only the selected provider. Both
+produce the same read-only reporting shape. Composio results use `source: composio`
+and include `graphError` when an automatic fallback follows a Graph error.
+If media view insights are unavailable, that item's views remain unknown while
+the rest of the report is still returned.
 
 Every `official-stats` run also persists a report-ready snapshot to:
 
