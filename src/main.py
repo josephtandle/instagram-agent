@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import random
+import re
 import subprocess
 import sys
 import time
@@ -73,6 +74,9 @@ SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
 IG_USERNAME = os.environ.get("IG_USERNAME", "")
 META_IG_ACCESS_TOKEN = os.environ.get("META_IG_ACCESS_TOKEN", "")
 META_IG_ACCOUNT_ID = os.environ.get("META_IG_ACCOUNT_ID", "")
+COMPOSIO_API_KEY = os.environ.get("COMPOSIO_API_KEY", "")
+COMPOSIO_INSTAGRAM_ACCOUNT = os.environ.get("COMPOSIO_INSTAGRAM_ACCOUNT", "")
+COMPOSIO_MCP_URL = "https://connect.composio.dev/mcp"
 BALI_TZ = ZoneInfo("Asia/Makassar")
 GRAPH_API_BASE = "https://graph.facebook.com/v19.0"
 
@@ -603,104 +607,304 @@ def _summarize_media(media: list[dict], windows: dict) -> dict:
     return windows
 
 
+def _official_stats_error(error: object) -> str:
+    """Redact credentials before an official-stats error reaches disk or stdout."""
+    message = str(error)
+    for secret in (META_IG_ACCESS_TOKEN, COMPOSIO_API_KEY):
+        if secret:
+            message = message.replace(secret, "[redacted]")
+    message = re.sub(r"(?i)(access_token=)[^&\s\"']+", r"\1[redacted]", message)
+    return re.sub(r"\bck_[A-Za-z0-9_-]+", "[redacted]", message)
+
+
+def _parse_composio_response(body: str) -> dict:
+    messages = [json.loads(line[5:].strip()) for line in body.splitlines() if line.startswith("data:")]
+    if messages:
+        return messages[-1]
+    return json.loads(body)
+
+
+class _ComposioConnect:
+    def __init__(self):
+        self.session_id = None
+        self.request_id = 1
+        self._post("initialize", {
+            "protocolVersion": "2025-06-18",
+            "capabilities": {},
+            "clientInfo": {"name": "instagram-agent", "version": "1.0.0"},
+        })
+        self._post("notifications/initialized", notification=True)
+
+    def _post(self, method: str, params: dict | None = None, notification: bool = False) -> dict:
+        headers = {
+            "x-consumer-api-key": COMPOSIO_API_KEY,
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
+            "MCP-Protocol-Version": "2025-06-18",
+        }
+        if self.session_id:
+            headers["Mcp-Session-Id"] = self.session_id
+        payload = {"jsonrpc": "2.0", "method": method}
+        if params is not None:
+            payload["params"] = params
+        if not notification:
+            payload["id"] = self.request_id
+            self.request_id += 1
+        request = Request(COMPOSIO_MCP_URL, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST")
+        try:
+            with urlopen(request, timeout=120) as response:
+                if method == "initialize":
+                    self.session_id = response.headers.get("Mcp-Session-Id")
+                body = response.read().decode("utf-8")
+        except HTTPError as exc:
+            raise RuntimeError(f"Composio Connect HTTP error: {exc.code}") from exc
+        except URLError as exc:
+            raise RuntimeError("Composio Connect request failed") from exc
+        if notification:
+            return {}
+        message = _parse_composio_response(body)
+        if message.get("error"):
+            raise RuntimeError(_official_stats_error(message["error"]))
+        return message.get("result", {})
+
+    def execute(self, tools: list[dict]) -> dict[int, dict]:
+        if not 1 <= len(tools) <= 50:
+            raise ValueError("Composio batches require 1 to 50 tools")
+        tools = [dict(tool) for tool in tools]
+        if COMPOSIO_INSTAGRAM_ACCOUNT:
+            for tool in tools:
+                tool["account"] = COMPOSIO_INSTAGRAM_ACCOUNT
+        result = self._post("tools/call", {
+            "name": "COMPOSIO_MULTI_EXECUTE_TOOL",
+            "arguments": {
+                "tools": tools,
+                "sync_response_to_workbench": False,
+                "current_step": "OFFICIAL_STATS",
+            },
+        })
+        if result.get("isError"):
+            raise RuntimeError("Composio tool call failed")
+        payload = json.loads(result["content"][0]["text"])
+        if not payload.get("successful"):
+            raise RuntimeError("Composio multi-execute failed")
+        return {item["index"]: item["response"] for item in payload.get("data", {}).get("results", [])}
+
+    def fetch(self, slug: str, arguments: dict) -> dict:
+        response = self.execute([{"tool_slug": slug, "arguments": arguments}]).get(0, {})
+        if not response.get("successful"):
+            raise RuntimeError(_official_stats_error(response.get("error") or f"Composio {slug} failed"))
+        return response.get("data", {})
+
+
+def _composio_media_views(client: _ComposioConnect, media: list[dict]) -> None:
+    pending = media
+    for metric in ("views", "plays"):
+        retry = []
+        for offset in range(0, len(pending), 50):
+            batch = pending[offset:offset + 50]
+            tools = [{"tool_slug": "INSTAGRAM_GET_IG_MEDIA_INSIGHTS", "arguments": {
+                "ig_media_id": item["id"], "metric": [metric],
+            }} for item in batch]
+            try:
+                responses = client.execute(tools)
+            except Exception:
+                responses = {}
+            for index, item in enumerate(batch):
+                response = responses.get(index, {})
+                entries = (response.get("data") or {}).get("data", []) if response.get("successful") else []
+                entry = next((entry for entry in entries if entry.get("name") == metric), {})
+                value = (entry.get("values") or [{}])[0].get("value")
+                if value is None:
+                    value = (entry.get("total_value") or {}).get("value")
+                try:
+                    item["views"] = int(value)
+                except (TypeError, ValueError):
+                    retry.append(item)
+        pending = retry
+
+
+def _get_composio_official_stats(args) -> dict:
+    client = _ComposioConnect()
+    account = client.fetch("INSTAGRAM_GET_USER_INFO", {
+        "ig_user_id": "me", "fields": "id,user_id,username,name,followers_count,media_count",
+    })
+    windows = _get_official_windows()
+    oldest_needed = min(datetime.fromisoformat(w["start"]) for w in windows.values())
+    media = []
+    after = None
+    for page in range(4):
+        arguments = {"ig_user_id": "me", "fields": "id,timestamp,media_type,like_count,comments_count,permalink", "limit": 100}
+        if after:
+            arguments["after"] = after
+        data = client.fetch("INSTAGRAM_GET_IG_USER_MEDIA", arguments)
+        reached_cutoff = False
+        for raw in data.get("data", []):
+            published_at = _parse_meta_datetime(raw.get("timestamp"))
+            if not published_at:
+                continue
+            if published_at < oldest_needed:
+                reached_cutoff = True
+                continue
+            media.append({
+                "id": raw.get("id", ""),
+                "publishedAt": published_at,
+                "mediaType": raw.get("media_type", ""),
+                "comments": int(raw.get("comments_count") or 0),
+                "likes": int(raw.get("like_count") or 0),
+                "permalink": raw.get("permalink", ""),
+                "views": None,
+            })
+        after = data.get("paging", {}).get("cursors", {}).get("after")
+        if reached_cutoff or not after:
+            break
+    _composio_media_views(client, media)
+    return {
+        "status": "ok",
+        "source": "composio",
+        "readOnly": True,
+        "generatedAt": datetime.now(timezone.utc).isoformat(),
+        "account": {
+            "id": account.get("user_id") or account.get("id", ""),
+            "username": account.get("username") or account.get("name") or "",
+            "followers": int(account.get("followers_count") or 0),
+            "media": int(account.get("media_count") or 0),
+        },
+        "windows": _summarize_media(media, windows),
+        "mediaFetched": len(media),
+        "media": [{**item, "publishedAt": item["publishedAt"].isoformat()} for item in media[:25]] if args.include_media else [],
+    }
+
+
 def cmd_official_stats(args):
-    """Read Instagram account stats via the official Meta Graph API only."""
-    if not META_IG_ACCESS_TOKEN or not META_IG_ACCOUNT_ID:
+    """Read official stats via Graph, with an optional Composio fallback."""
+    source = getattr(args, "source", "auto")
+    graph_configured = bool(META_IG_ACCESS_TOKEN and META_IG_ACCOUNT_ID)
+    use_graph = source == "graph" or (source == "auto" and graph_configured)
+    if source == "graph":
+        available = graph_configured
+    elif source == "composio":
+        available = bool(COMPOSIO_API_KEY)
+    else:
+        available = graph_configured or bool(COMPOSIO_API_KEY)
+    if not available:
         result = {
             "status": "unavailable",
-            "source": "meta_graph_api",
+            "source": "composio" if source == "composio" else "meta_graph_api",
             "readOnly": True,
             "configured": {
                 "META_IG_ACCESS_TOKEN": bool(META_IG_ACCESS_TOKEN),
                 "META_IG_ACCOUNT_ID": bool(META_IG_ACCOUNT_ID),
+                "COMPOSIO_API_KEY": bool(COMPOSIO_API_KEY),
             },
-            "error": "META_IG_ACCESS_TOKEN and META_IG_ACCOUNT_ID are required for official read-only Instagram stats.",
+            "error": "Official read-only Instagram stats require META_IG_ACCESS_TOKEN and META_IG_ACCOUNT_ID for Graph, or COMPOSIO_API_KEY for Composio. Configure credentials for the selected source.",
         }
         _persist_official_stats(args.username, result)
         write_status("idle", "partial", "Official Instagram stats unavailable")
         print(json.dumps(result, indent=2))
         return
 
+    graph_error = None
     try:
-        account = _graph_get(
-            META_IG_ACCOUNT_ID,
-            {"fields": "id,username,name,followers_count,media_count"},
-        )
-        windows = _get_official_windows()
-        oldest_needed = min(datetime.fromisoformat(w["start"]) for w in windows.values())
-        media = []
-        next_url = None
-        fields = "id,timestamp,media_type,like_count,comments_count,permalink"
-
-        for page in range(4):
-            if next_url:
-                data = _graph_get(next_url)
-            else:
-                data = _graph_get(
-                    f"{META_IG_ACCOUNT_ID}/media",
-                    {"fields": fields, "limit": "100"},
-                )
-
-            for raw in data.get("data", []):
-                published_at = _parse_meta_datetime(raw.get("timestamp"))
-                if not published_at:
-                    continue
-                if published_at < oldest_needed:
-                    continue
-                media.append({
-                    "id": raw.get("id", ""),
-                    "publishedAt": published_at,
-                    "mediaType": raw.get("media_type", ""),
-                    "comments": int(raw.get("comments_count") or 0),
-                    "likes": int(raw.get("like_count") or 0),
-                    "permalink": raw.get("permalink", ""),
-                    "views": _fetch_media_view_count(raw.get("id", "")),
-                })
-
-            oldest_on_page = media[-1]["publishedAt"] if media else None
-            if oldest_on_page and oldest_on_page < oldest_needed:
-                break
-            next_url = data.get("paging", {}).get("next")
-            if not next_url:
-                break
-
-        summarized = _summarize_media(media, windows)
-        result = {
-            "status": "ok",
-            "source": "meta_graph_api",
-            "readOnly": True,
-            "generatedAt": datetime.now(timezone.utc).isoformat(),
-            "account": {
-                "id": account.get("id", META_IG_ACCOUNT_ID),
-                "username": account.get("username") or account.get("name") or "",
-                "followers": int(account.get("followers_count") or 0),
-                "media": int(account.get("media_count") or 0),
-            },
-            "windows": summarized,
-            "mediaFetched": len(media),
-            "media": [
-                {
-                    **item,
-                    "publishedAt": item["publishedAt"].isoformat(),
-                }
-                for item in media[:25]
-            ] if args.include_media else [],
-        }
+        if use_graph:
+            try:
+                result = _get_graph_official_stats(args)
+            except Exception as exc:
+                # Any Graph failure (auth, permissions, rate limit, network) falls back to Composio in auto mode.
+                if source != "auto" or not COMPOSIO_API_KEY:
+                    raise
+                graph_error = _official_stats_error(exc)
+                use_graph = False
+                result = _get_composio_official_stats(args)
+        else:
+            result = _get_composio_official_stats(args)
+        if graph_error:
+            result["graphError"] = graph_error
         _persist_official_stats(args.username, result)
         mark_account_success(args.username, "official_stats")
         print(json.dumps(result, ensure_ascii=False, indent=2))
         write_status("idle", "success", "Official Instagram stats fetched")
     except Exception as e:
+        error = _official_stats_error(e)
         result = {
             "status": "error",
-            "source": "meta_graph_api",
+            "source": "meta_graph_api" if use_graph else "composio",
             "readOnly": True,
-            "error": str(e),
+            "error": error,
         }
+        if graph_error:
+            result["graphError"] = graph_error
         _persist_official_stats(args.username, result)
-        write_status("idle", "error", str(e))
+        write_status("idle", "error", error)
         print(json.dumps(result, ensure_ascii=False, indent=2))
         sys.exit(1)
+
+
+def _get_graph_official_stats(args) -> dict:
+    account = _graph_get(
+        META_IG_ACCOUNT_ID,
+        {"fields": "id,username,name,followers_count,media_count"},
+    )
+    windows = _get_official_windows()
+    oldest_needed = min(datetime.fromisoformat(w["start"]) for w in windows.values())
+    media = []
+    next_url = None
+    fields = "id,timestamp,media_type,like_count,comments_count,permalink"
+
+    for page in range(4):
+        if next_url:
+            data = _graph_get(next_url)
+        else:
+            data = _graph_get(
+                f"{META_IG_ACCOUNT_ID}/media",
+                {"fields": fields, "limit": "100"},
+            )
+
+        for raw in data.get("data", []):
+            published_at = _parse_meta_datetime(raw.get("timestamp"))
+            if not published_at:
+                continue
+            if published_at < oldest_needed:
+                continue
+            media.append({
+                "id": raw.get("id", ""),
+                "publishedAt": published_at,
+                "mediaType": raw.get("media_type", ""),
+                "comments": int(raw.get("comments_count") or 0),
+                "likes": int(raw.get("like_count") or 0),
+                "permalink": raw.get("permalink", ""),
+                "views": _fetch_media_view_count(raw.get("id", "")),
+            })
+
+        oldest_on_page = media[-1]["publishedAt"] if media else None
+        if oldest_on_page and oldest_on_page < oldest_needed:
+            break
+        next_url = data.get("paging", {}).get("next")
+        if not next_url:
+            break
+
+    summarized = _summarize_media(media, windows)
+    result = {
+        "status": "ok",
+        "source": "meta_graph_api",
+        "readOnly": True,
+        "generatedAt": datetime.now(timezone.utc).isoformat(),
+        "account": {
+            "id": account.get("id", META_IG_ACCOUNT_ID),
+            "username": account.get("username") or account.get("name") or "",
+            "followers": int(account.get("followers_count") or 0),
+            "media": int(account.get("media_count") or 0),
+        },
+        "windows": summarized,
+        "mediaFetched": len(media),
+        "media": [
+            {
+                **item,
+                "publishedAt": item["publishedAt"].isoformat(),
+            }
+            for item in media[:25]
+        ] if args.include_media else [],
+    }
+    return result
 
 
 # ── Commands ──────────────────────────────────────────────────────
@@ -1316,7 +1520,7 @@ def main():
     # official-stats
     p_official_stats = subparsers.add_parser(
         "official-stats",
-        help="Read account, yesterday, weekly, and month-to-date stats via Meta Graph API",
+        help="Read account, yesterday, weekly, and month-to-date stats via Graph or Composio",
     )
     p_official_stats.add_argument(
         "--include-media",
@@ -1324,6 +1528,10 @@ def main():
         help="Include up to 25 fetched media rows in the JSON output",
     )
     p_official_stats.set_defaults(func=cmd_official_stats)
+    p_official_stats.add_argument(
+        "--source", choices=("auto", "graph", "composio"), default="auto",
+        help="Stats source (default: auto; Graph first, then Composio for missing credentials or auth errors)",
+    )
 
     # reply-comment
     p_reply_comment = subparsers.add_parser("reply-comment", help="Reply to a comment on a post or reel")
