@@ -1,8 +1,8 @@
 {
   "status": "ok",
-  "source": "composio",
+  "source": "meta_graph_api",
   "readOnly": true,
-  "generatedAt": "2026-10-12T00:49:28.335275+00:00",
+  "generatedAt": "2026-10-12T01:12:07.855175+00:00",
   "account": {
     "id": "17841401753535811",
     "username": "joe.che.official",
@@ -25,7 +25,7 @@
       "start": "2026-10-05T00:00:00+08:00",
       "end": "2026-10-12T00:00:00+08:00",
       "posts": 7,
-      "views": 3426,
+      "views": 3428,
       "comments": 50,
       "likes": 94,
       "hasViewData": true
@@ -35,7 +35,7 @@
       "start": "2026-09-28T00:00:00+08:00",
       "end": "2026-10-05T00:00:00+08:00",
       "posts": 4,
-      "views": 2175,
+      "views": 2177,
       "comments": 15,
       "likes": 66,
       "hasViewData": true
@@ -43,9 +43,9 @@
     "monthToDate": {
       "label": "month to date",
       "start": "2026-10-01T00:00:00+08:00",
-      "end": "2026-10-12T08:49:22.371092+08:00",
+      "end": "2026-10-12T09:11:59.382204+08:00",
       "posts": 9,
-      "views": 4394,
+      "views": 4398,
       "comments": 56,
       "likes": 119,
       "hasViewData": true
