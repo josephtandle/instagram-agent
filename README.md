@@ -252,3 +252,16 @@ The agent looks for credentials in this order:
 ## License
 
 MIT
+
+## Publishing through the official API (verified 2026-10-12)
+
+Password login through instagrapi is now rejected by Instagram ("Your version of Instagram is out of date", even on instagrapi 3.0.21), and saved sessions expire. **Post carousels through the Instagram Graph API via Composio Connect instead**: it is inside Meta's Terms of Service and needs no login.
+
+Flow (all `COMPOSIO_MULTI_EXECUTE_TOOL` calls on the `instagram` connection, `COMPOSIO_INSTAGRAM_ACCOUNT`):
+1. Host the slides at public HTTPS URLs (muapi `upload_file` works: `https://cdn.muapi.ai/...`). Instagram fetches them itself.
+2. `INSTAGRAM_POST_IG_USER_MEDIA` once per slide with `ig_user_id`, `image_url`, `is_carousel_item: true` -> child ids.
+3. `INSTAGRAM_CREATE_CAROUSEL_CONTAINER` with `ig_user_id`, `caption`, `children: [child ids]` -> parent id.
+4. `INSTAGRAM_POST_IG_USER_MEDIA_PUBLISH` with `creation_id: parent` (+ `max_wait_seconds`) -> media id.
+5. `INSTAGRAM_GET_IG_MEDIA` with `ig_media_id` for the permalink.
+
+First live post this way: media id 18051197120601508 (Ray Dalio Council carousel, 2026-10-12). Worked example script: `~/.myos/workspace/tasks/hooklab/dalio-carousel-post/` (step1-children.json, step2-carousel.json, step3-publish.json). The direct `META_IG_ACCESS_TOKEN` cannot publish (no `instagram_content_publish` scope); the Composio connection can.
