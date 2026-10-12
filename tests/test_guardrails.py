@@ -29,6 +29,7 @@ class InstagramGuardrailTests(unittest.TestCase):
         self.main.USAGE_PATH = self.base / "usage.json"
         self.main.HEALTH_PATH = self.base / "health.json"
         self.main.LATEST_OFFICIAL_STATS_PATH = self.base / "latest_official_stats.json"
+        self.main.STATUS_PATH = self.base / "status.json"
 
         self.transcriber.HEALTH_PATH = self.base / "transcriber-health.json"
         self.transcriber.SESSIONS_DIR = self.base / "sessions"
@@ -71,7 +72,7 @@ class InstagramGuardrailTests(unittest.TestCase):
 
     def test_official_stats_unavailable_persists_snapshot(self):
         args = type("Args", (), {"username": "joe"})()
-        with mock.patch.object(self.main, "META_IG_ACCESS_TOKEN", ""), mock.patch.object(self.main, "META_IG_ACCOUNT_ID", ""):
+        with mock.patch.object(self.main, "META_IG_ACCESS_TOKEN", ""), mock.patch.object(self.main, "META_IG_ACCOUNT_ID", ""), mock.patch.object(self.main, "COMPOSIO_API_KEY", ""):
             self.main.cmd_official_stats(args)
 
         latest = json.loads(self.main.LATEST_OFFICIAL_STATS_PATH.read_text())
